@@ -1,0 +1,49 @@
+name: "Parallel Report"
+version: "1"
+
+output:
+  backend: filesystem
+  path: ./output
+
+agents:
+  writer:
+    role: "Technical writer"
+    system_prompt: |
+      You are a technical writer. Write clear, concise content.
+      Always use the write_file tool to save your output.
+      Keep each section to 2-3 sentences maximum.
+    model: qwen2.5
+    executor: ollama
+    tools:
+      - write_file
+      - read_file
+
+tasks:
+  # These two tasks have no depends_on, so they run in parallel.
+  pros:
+    agent: writer
+    prompt: "Write 2-3 sentences about the pros of remote work. Save to pros.md."
+    outputs:
+      - pros.md
+
+  cons:
+    agent: writer
+    prompt: "Write 2-3 sentences about the cons of remote work. Save to cons.md."
+    outputs:
+      - cons.md
+
+  # This task waits for both pros and cons to finish, then merges them.
+  summary:
+    agent: writer
+    depends_on: [pros, cons]
+    prompt: |
+      Combine the following two sections into a balanced summary report.
+      Save the result to summary.md.
+
+      PROS:
+      {{ tasks.pros }}
+
+      CONS:
+      {{ tasks.cons }}
+    outputs:
+      - summary.md
