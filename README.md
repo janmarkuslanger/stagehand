@@ -7,7 +7,7 @@ Stagehand orchestrates multi-agent AI workflows in pure Python. Each workflow is
 ## Installation
 
 ```bash
-pip install stagehand
+pip install stagehand-ai
 ```
 
 Requires Python 3.11+.
