@@ -1,20 +1,23 @@
 """
-End-to-end integration test with a local Ollama instance.
+End-to-end example using a local Ollama instance.
 
 Run with:
     python examples/ollama_test.py
+
+Output files land in ./output/
 """
 import asyncio
-import tempfile
 
 from stagehand import WorkflowBuilder
 from stagehand.adapters.executor import OllamaExecutor
 from stagehand.adapters.storage.filesystem import FilesystemStorage
 
+OUTPUT_DIR = "output"
+STATE_DIR = ".stagehand/runs"
+
 
 async def main() -> None:
-    output_dir = tempfile.mkdtemp(prefix="stagehand-ollama-")
-    storage = FilesystemStorage(output_dir)
+    storage = FilesystemStorage(OUTPUT_DIR)
     executor = OllamaExecutor(storage=storage)
 
     print("=== Sequential: Haiku Pipeline ===")
@@ -42,11 +45,12 @@ async def main() -> None:
             ),
             after=["draft"],
         )
-        .state_dir(output_dir)
+        .state_dir(STATE_DIR)
         .run()
     )
-    print(f"run_id: {run_id}")
-    print(f"output: {output_dir}\n")
+    print(f"run_id : {run_id}")
+    print(f"output : {OUTPUT_DIR}/draft/draft.md")
+    print(f"         {OUTPUT_DIR}/refine/final.md\n")
 
     print("=== Parallel: Pros / Cons Report ===")
     run_id2 = await (
@@ -75,11 +79,13 @@ async def main() -> None:
             ),
             after=["pros", "cons"],
         )
-        .state_dir(output_dir)
+        .state_dir(STATE_DIR)
         .run()
     )
-    print(f"run_id: {run_id2}")
-    print(f"output: {output_dir}")
+    print(f"run_id : {run_id2}")
+    print(f"output : {OUTPUT_DIR}/pros/pros.md")
+    print(f"         {OUTPUT_DIR}/cons/cons.md")
+    print(f"         {OUTPUT_DIR}/summary/summary.md")
 
 
 if __name__ == "__main__":
