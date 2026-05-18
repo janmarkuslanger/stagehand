@@ -100,53 +100,15 @@ class Scheduler:
         outcome_queue: asyncio.Queue[_TaskOutcome] = asyncio.Queue()
         running_count = 0
 
-        async def launch(task_id: str) -> None:
+        def launch(task_id: str) -> None:
             nonlocal running_count
             phases[task_id] = TaskPhase.RUNNING
             running_count += 1
-            asyncio.create_task(_run_task(task_id))
-
-        async def _run_task(task_id: str) -> None:
-            task = workflow.tasks[task_id]
-            policy = task.retry
-            last_error: Optional[Exception] = None
-
-            for attempt in range(policy.max_attempts):
-                try:
-                    prompt = resolve(task.prompt, run_context)
-                    agent = workflow.agents[task.agent_id]
-                    executor = agent.executor or self.default_executor
-                    if executor is None:
-                        raise RuntimeError(
-                            f"task {task_id}: agent {task.agent_id!r} has no executor set"
-                        )
-                    request = ExecutionRequest(
-                        system_prompt=agent.system_prompt,
-                        model=agent.model,
-                        tools=agent.tools,
-                        prompt=prompt,
-                        run_id=run_context.run_id,
-                        task_id=task_id,
-                    )
-                    exec_result = await executor.execute(request)
-                    await outcome_queue.put(
-                        _TaskOutcome(
-                            task_id=task_id,
-                            result=TaskResult(output=exec_result.output, files=exec_result.files),
-                        )
-                    )
-                    return
-                except Exception as exc:
-                    last_error = exc
-                    has_remaining_attempts = attempt < policy.max_attempts - 1
-                    if has_remaining_attempts and policy.delay > 0:
-                        await asyncio.sleep(policy.delay)
-
-            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=last_error))
+            asyncio.create_task(self._run_task(task_id, workflow, run_context, outcome_queue))
 
         for task_id in workflow.tasks:
             if in_degree[task_id] == 0 and phases[task_id] == TaskPhase.WAITING:
-                await launch(task_id)
+                launch(task_id)
 
         first_error: Optional[Exception] = None
 
@@ -168,9 +130,53 @@ class Scheduler:
                         continue
                     in_degree[dependent_id] -= 1
                     if in_degree[dependent_id] == 0:
-                        await launch(dependent_id)
+                        launch(dependent_id)
 
         return first_error
+
+    async def _run_task(
+        self,
+        task_id: str,
+        workflow: Workflow,
+        run_context: RunContext,
+        outcome_queue: asyncio.Queue[_TaskOutcome],
+    ) -> None:
+        task = workflow.tasks[task_id]
+        policy = task.retry
+        last_error: Optional[Exception] = None
+
+        for attempt in range(policy.max_attempts):
+            try:
+                prompt = resolve(task.prompt, run_context)
+                agent = workflow.agents[task.agent_id]
+                executor = agent.executor or self.default_executor
+                if executor is None:
+                    raise RuntimeError(
+                        f"task {task_id}: agent {task.agent_id!r} has no executor set"
+                    )
+                request = ExecutionRequest(
+                    system_prompt=agent.system_prompt,
+                    model=agent.model,
+                    tools=agent.tools,
+                    prompt=prompt,
+                    run_id=run_context.run_id,
+                    task_id=task_id,
+                )
+                exec_result = await executor.execute(request)
+                await outcome_queue.put(
+                    _TaskOutcome(
+                        task_id=task_id,
+                        result=TaskResult(output=exec_result.output, files=exec_result.files),
+                    )
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                has_remaining_attempts = attempt < policy.max_attempts - 1
+                if has_remaining_attempts and policy.delay > 0:
+                    await asyncio.sleep(policy.delay)
+
+        await outcome_queue.put(_TaskOutcome(task_id=task_id, error=last_error))
 
 
 def _cancel_downstream(
