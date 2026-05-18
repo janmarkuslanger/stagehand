@@ -100,8 +100,31 @@ A task is a single unit of work assigned to an agent. Tasks form the nodes of th
 | `after` | no | List of task IDs this task waits for |
 | `outputs` | no | `StaticOutputs`, `DynamicOutputs`, or `PatternOutputs` |
 | `secrets` | no | List of secret names to resolve at runtime |
+| `retry` | no | `RetryPolicy` — how many times to retry on failure |
 
 Tasks with no `after` (or whose dependencies are all complete) start immediately. Multiple ready tasks run in parallel.
+
+---
+
+### Retry
+
+Pass a `RetryPolicy` to a task to retry it automatically on failure. Downstream tasks are only cancelled once all attempts are exhausted.
+
+```python
+from stagehand import RetryPolicy
+
+.task(
+    "fetch",
+    agent="worker",
+    prompt="Fetch the latest report.",
+    retry=RetryPolicy(max_attempts=3, delay=2.0),
+)
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `max_attempts` | `1` | Total attempts including the first (1 = no retry) |
+| `delay` | `0.0` | Seconds to wait between attempts |
 
 ---
 
