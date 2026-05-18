@@ -9,8 +9,8 @@ from stagehand.core.context import RunContext
 from stagehand.core.graph import build_graph
 from stagehand.core.runstate import build_run_state, generate_run_id, load_state, save
 from stagehand.core.template import resolve
-from stagehand.core.workflow import TaskResult, Workflow
-from stagehand.ports.executor import AgentExecutor, ExecutionRequest
+from stagehand.core.workflow import RetryPolicy, TaskResult, Workflow
+from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
 
 
 class TaskPhase(Enum):
@@ -158,28 +158,35 @@ class Scheduler:
             task_id=task_id,
         )
 
-        policy = task.retry
-        last_error: Optional[Exception] = None
-
-        for attempt in range(policy.max_attempts):
-            try:
-                exec_result = await executor.execute(request)
-            except Exception as exc:
-                last_error = exc
-                has_remaining_attempts = attempt < policy.max_attempts - 1
-                if has_remaining_attempts and policy.delay > 0:
-                    await asyncio.sleep(policy.delay)
-                continue
-
-            await outcome_queue.put(
-                _TaskOutcome(
-                    task_id=task_id,
-                    result=TaskResult(output=exec_result.output, files=exec_result.files),
-                )
-            )
+        try:
+            exec_result = await _execute_with_retry(executor, request, task.retry)
+        except Exception as exc:
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=exc))
             return
 
-        await outcome_queue.put(_TaskOutcome(task_id=task_id, error=last_error))
+        await outcome_queue.put(
+            _TaskOutcome(task_id=task_id, result=TaskResult(output=exec_result.output, files=exec_result.files))
+        )
+
+
+async def _execute_with_retry(
+    executor: AgentExecutor,
+    request: ExecutionRequest,
+    policy: RetryPolicy,
+) -> ExecutionResult:
+    last_error: Optional[Exception] = None
+
+    for attempt in range(policy.max_attempts):
+        try:
+            return await executor.execute(request)
+        except Exception as exc:
+            last_error = exc
+            has_remaining_attempts = attempt < policy.max_attempts - 1
+            if has_remaining_attempts and policy.delay > 0:
+                await asyncio.sleep(policy.delay)
+
+    raise last_error  # type: ignore[misc]
+
 
 
 def _cancel_downstream(
