@@ -138,7 +138,8 @@ class Scheduler:
                     return
                 except Exception as exc:
                     last_error = exc
-                    if attempt < policy.max_attempts - 1 and policy.delay > 0:
+                    has_remaining_attempts = attempt < policy.max_attempts - 1
+                    if has_remaining_attempts and policy.delay > 0:
                         await asyncio.sleep(policy.delay)
 
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=last_error))
