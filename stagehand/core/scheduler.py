@@ -142,39 +142,42 @@ class Scheduler:
         outcome_queue: asyncio.Queue[_TaskOutcome],
     ) -> None:
         task = workflow.tasks[task_id]
+        agent = workflow.agents[task.agent_id]
+        executor = agent.executor or self.default_executor
+        if executor is None:
+            err = RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=err))
+            return
+
+        request = ExecutionRequest(
+            system_prompt=agent.system_prompt,
+            model=agent.model,
+            tools=agent.tools,
+            prompt=resolve(task.prompt, run_context),
+            run_id=run_context.run_id,
+            task_id=task_id,
+        )
+
         policy = task.retry
         last_error: Optional[Exception] = None
 
         for attempt in range(policy.max_attempts):
             try:
-                prompt = resolve(task.prompt, run_context)
-                agent = workflow.agents[task.agent_id]
-                executor = agent.executor or self.default_executor
-                if executor is None:
-                    raise RuntimeError(
-                        f"task {task_id}: agent {task.agent_id!r} has no executor set"
-                    )
-                request = ExecutionRequest(
-                    system_prompt=agent.system_prompt,
-                    model=agent.model,
-                    tools=agent.tools,
-                    prompt=prompt,
-                    run_id=run_context.run_id,
-                    task_id=task_id,
-                )
                 exec_result = await executor.execute(request)
-                await outcome_queue.put(
-                    _TaskOutcome(
-                        task_id=task_id,
-                        result=TaskResult(output=exec_result.output, files=exec_result.files),
-                    )
-                )
-                return
             except Exception as exc:
                 last_error = exc
                 has_remaining_attempts = attempt < policy.max_attempts - 1
                 if has_remaining_attempts and policy.delay > 0:
                     await asyncio.sleep(policy.delay)
+                continue
+
+            await outcome_queue.put(
+                _TaskOutcome(
+                    task_id=task_id,
+                    result=TaskResult(output=exec_result.output, files=exec_result.files),
+                )
+            )
+            return
 
         await outcome_queue.put(_TaskOutcome(task_id=task_id, error=last_error))
 
