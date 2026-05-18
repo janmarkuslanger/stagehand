@@ -25,7 +25,7 @@ class TaskPhase(Enum):
 class _TaskOutcome:
     task_id: str
     result: Optional[TaskResult] = None
-    erroror: Optional[Exception] = None
+    error: Optional[Exception] = None
 
 
 class Scheduler:
@@ -99,26 +99,29 @@ class Scheduler:
 
         outcome_queue: asyncio.Queue[_TaskOutcome] = asyncio.Queue()
         running_count = 0
+        running_tasks: set[asyncio.Task[None]] = set()
 
         def launch(task_id: str) -> None:
             nonlocal running_count
             phases[task_id] = TaskPhase.RUNNING
             running_count += 1
-            asyncio.create_task(self._run_task(task_id, workflow, run_context, outcome_queue))
+            asyncio_task = asyncio.create_task(self._run_task(task_id, workflow, run_context, outcome_queue))
+            running_tasks.add(asyncio_task)
+            asyncio_task.add_done_callback(running_tasks.discard)
 
         for task_id in workflow.tasks:
             if in_degree[task_id] == 0 and phases[task_id] == TaskPhase.WAITING:
                 launch(task_id)
 
-        first_erroror: Optional[Exception] = None
+        first_error: Optional[Exception] = None
 
         while running_count > 0:
             outcome = await outcome_queue.get()
             running_count -= 1
 
-            if outcome.erroror is not None:
-                if first_erroror is None:
-                    first_erroror = outcome.erroror
+            if outcome.error is not None:
+                if first_error is None:
+                    first_error = outcome.error
                 phases[outcome.task_id] = TaskPhase.FAILED
                 _cancel_downstream(outcome.task_id, graph, phases)
             else:
@@ -132,7 +135,7 @@ class Scheduler:
                     if in_degree[dependent_id] == 0:
                         launch(dependent_id)
 
-        return first_erroror
+        return first_error
 
     async def _run_task(
         self,
@@ -146,7 +149,7 @@ class Scheduler:
         executor = agent.executor or self.default_executor
         if executor is None:
             error = RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
-            await outcome_queue.put(_TaskOutcome(task_id=task_id, erroror=error))
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
             return
 
         request = ExecutionRequest(
@@ -160,8 +163,8 @@ class Scheduler:
 
         try:
             exec_result = await _execute_with_retry(executor, request, task.retry)
-        except Exception as erroror:
-            await outcome_queue.put(_TaskOutcome(task_id=task_id, erroror=erroror))
+        except Exception as error:
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
             return
 
         await outcome_queue.put(
@@ -174,18 +177,18 @@ async def _execute_with_retry(
     request: ExecutionRequest,
     policy: RetryPolicy,
 ) -> ExecutionResult:
-    last_erroror: Optional[Exception] = None
+    last_error: Optional[Exception] = None
 
     for attempt in range(policy.max_attempts):
         try:
             return await executor.execute(request)
-        except Exception as erroror:
-            last_erroror = erroror
+        except Exception as error:
+            last_error = error
             has_remaining_attempts = attempt < policy.max_attempts - 1
             if has_remaining_attempts and policy.delay > 0:
                 await asyncio.sleep(policy.delay)
 
-    raise last_erroror  # type: ignore[misc]
+    raise last_error  # type: ignore[misc]
 
 
 
