@@ -1,5 +1,6 @@
 import tempfile
 from typing import Optional
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -177,6 +178,107 @@ async def test_no_retry_by_default():
     with pytest.raises(RuntimeError):
         await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
     assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_delay_is_applied_between_attempts():
+    attempts: list[str] = []
+
+    class FlakyExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            attempts.append(request.task_id)
+            if len(attempts) < 3:
+                raise RuntimeError("transient failure")
+            return ExecutionResult(output="ok", files=[])
+
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="do it", retry=RetryPolicy(max_attempts=3, delay=1.5))},
+        FlakyExecutor(),
+    )
+    with patch("stagehand.core.scheduler.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
+    assert mock_sleep.call_count == 2
+    mock_sleep.assert_called_with(1.5)
+
+
+@pytest.mark.asyncio
+async def test_retry_no_delay_when_delay_is_zero():
+    class FlakyExecutor(AgentExecutor):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            self.calls += 1
+            if self.calls < 2:
+                raise RuntimeError("transient failure")
+            return ExecutionResult(output="ok", files=[])
+
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="do it", retry=RetryPolicy(max_attempts=2, delay=0.0))},
+        FlakyExecutor(),
+    )
+    with patch("stagehand.core.scheduler.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
+    mock_sleep.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_retry_success_runs_downstream():
+    attempts: list[str] = []
+    order: list[str] = []
+
+    class FlakyThenOkExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            order.append(request.task_id)
+            if request.task_id == "t1":
+                attempts.append("t1")
+                if len(attempts) < 2:
+                    raise RuntimeError("transient failure")
+            return ExecutionResult(output=f"out-{request.task_id}", files=[])
+
+    wf = _make_workflow({
+        "t1": Task(agent_id="a", prompt="flaky", retry=RetryPolicy(max_attempts=3)),
+        "t2": Task(agent_id="a", prompt="downstream", depends_on=["t1"]),
+    }, FlakyThenOkExecutor())
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
+    assert len(attempts) == 2
+    assert "t2" in order
+    assert order.index("t1") < order.index("t2")
+
+
+@pytest.mark.asyncio
+async def test_retry_exhausted_cancels_downstream():
+    order: list[str] = []
+
+    class AlwaysFailExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            order.append(request.task_id)
+            raise RuntimeError("permanent failure")
+
+    wf = _make_workflow({
+        "t1": Task(agent_id="a", prompt="fail", retry=RetryPolicy(max_attempts=2)),
+        "t2": Task(agent_id="a", prompt="downstream", depends_on=["t1"]),
+    }, AlwaysFailExecutor())
+    with pytest.raises(RuntimeError, match="permanent failure"):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
+    assert order.count("t1") == 2
+    assert "t2" not in order
+
+
+@pytest.mark.asyncio
+async def test_bad_template_reported_as_task_failure():
+    executor = RecordingExecutor()
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="{{ tasks.nonexistent }}")},
+        executor,
+    )
+    with pytest.raises(Exception):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert "t1" not in executor.order
 
 
 @pytest.mark.asyncio
