@@ -152,16 +152,15 @@ class Scheduler:
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
             return
 
-        request = ExecutionRequest(
-            system_prompt=agent.system_prompt,
-            model=agent.model,
-            tools=agent.tools,
-            prompt=resolve(task.prompt, run_context),
-            run_id=run_context.run_id,
-            task_id=task_id,
-        )
-
         try:
+            request = ExecutionRequest(
+                system_prompt=agent.system_prompt,
+                model=agent.model,
+                tools=agent.tools,
+                prompt=resolve(task.prompt, run_context),
+                run_id=run_context.run_id,
+                task_id=task_id,
+            )
             exec_result = await _execute_with_retry(executor, request, task.retry)
         except Exception as error:
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
