@@ -9,8 +9,8 @@ from stagehand.core.context import RunContext
 from stagehand.core.graph import build_graph
 from stagehand.core.runstate import build_run_state, generate_run_id, load_state, save
 from stagehand.core.template import resolve
-from stagehand.core.workflow import TaskResult, Workflow
-from stagehand.ports.executor import AgentExecutor, ExecutionRequest
+from stagehand.core.workflow import RetryPolicy, TaskResult, Workflow
+from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
 
 
 class TaskPhase(Enum):
@@ -52,11 +52,11 @@ class Scheduler:
         """Runs all tasks in the workflow. Returns the run_id."""
         run_id = generate_run_id()
         run_context = RunContext(run_id=run_id, inputs=inputs or {})
-        err = await self._execute(workflow, run_context)
-        state = build_run_state(run_id, run_label, workflow, inputs or {}, run_context, err)
+        error = await self._execute(workflow, run_context)
+        state = build_run_state(run_id, run_label, workflow, inputs or {}, run_context, error)
         save(state, self.run_state_directory)
-        if err is not None:
-            raise err
+        if error is not None:
+            raise error
         return run_id
 
     async def resume(self, run_id: str, workflow: Workflow) -> str:
@@ -74,11 +74,11 @@ class Scheduler:
                     TaskResult(output=task_state.output, files=task_state.files),
                 )
 
-        err = await self._execute(workflow, run_context)
-        new_state = build_run_state(run_id, state.workflow_file, workflow, state.inputs, run_context, err)
+        error = await self._execute(workflow, run_context)
+        new_state = build_run_state(run_id, state.workflow_file, workflow, state.inputs, run_context, error)
         save(new_state, self.run_state_directory)
-        if err is not None:
-            raise err
+        if error is not None:
+            raise error
         return run_id
 
     async def _execute(self, workflow: Workflow, run_context: RunContext) -> Optional[Exception]:
@@ -99,44 +99,19 @@ class Scheduler:
 
         outcome_queue: asyncio.Queue[_TaskOutcome] = asyncio.Queue()
         running_count = 0
+        running_tasks: set[asyncio.Task[None]] = set()
 
-        async def launch(task_id: str) -> None:
+        def launch(task_id: str) -> None:
             nonlocal running_count
             phases[task_id] = TaskPhase.RUNNING
             running_count += 1
-            asyncio.create_task(_run_task(task_id))
-
-        async def _run_task(task_id: str) -> None:
-            task = workflow.tasks[task_id]
-            try:
-                prompt = resolve(task.prompt, run_context)
-                agent = workflow.agents[task.agent_id]
-                executor = agent.executor or self.default_executor
-                if executor is None:
-                    raise RuntimeError(
-                        f"task {task_id}: agent {task.agent_id!r} has no executor set"
-                    )
-                request = ExecutionRequest(
-                    system_prompt=agent.system_prompt,
-                    model=agent.model,
-                    tools=agent.tools,
-                    prompt=prompt,
-                    run_id=run_context.run_id,
-                    task_id=task_id,
-                )
-                exec_result = await executor.execute(request)
-                await outcome_queue.put(
-                    _TaskOutcome(
-                        task_id=task_id,
-                        result=TaskResult(output=exec_result.output, files=exec_result.files),
-                    )
-                )
-            except Exception as exc:
-                await outcome_queue.put(_TaskOutcome(task_id=task_id, error=exc))
+            asyncio_task = asyncio.create_task(self._run_task(task_id, workflow, run_context, outcome_queue))
+            running_tasks.add(asyncio_task)
+            asyncio_task.add_done_callback(running_tasks.discard)
 
         for task_id in workflow.tasks:
             if in_degree[task_id] == 0 and phases[task_id] == TaskPhase.WAITING:
-                await launch(task_id)
+                launch(task_id)
 
         first_error: Optional[Exception] = None
 
@@ -158,9 +133,62 @@ class Scheduler:
                         continue
                     in_degree[dependent_id] -= 1
                     if in_degree[dependent_id] == 0:
-                        await launch(dependent_id)
+                        launch(dependent_id)
 
         return first_error
+
+    async def _run_task(
+        self,
+        task_id: str,
+        workflow: Workflow,
+        run_context: RunContext,
+        outcome_queue: asyncio.Queue[_TaskOutcome],
+    ) -> None:
+        task = workflow.tasks[task_id]
+        agent = workflow.agents[task.agent_id]
+        executor = agent.executor or self.default_executor
+        if executor is None:
+            error = RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
+            return
+
+        try:
+            request = ExecutionRequest(
+                system_prompt=agent.system_prompt,
+                model=agent.model,
+                tools=agent.tools,
+                prompt=resolve(task.prompt, run_context),
+                run_id=run_context.run_id,
+                task_id=task_id,
+            )
+            exec_result = await _execute_with_retry(executor, request, task.retry)
+        except Exception as error:
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
+            return
+
+        await outcome_queue.put(
+            _TaskOutcome(task_id=task_id, result=TaskResult(output=exec_result.output, files=exec_result.files))
+        )
+
+
+async def _execute_with_retry(
+    executor: AgentExecutor,
+    request: ExecutionRequest,
+    policy: RetryPolicy,
+) -> ExecutionResult:
+    last_error: Optional[Exception] = None
+
+    for attempt in range(policy.max_attempts):
+        try:
+            return await executor.execute(request)
+        except Exception as error:
+            last_error = error
+            has_remaining_attempts = attempt < policy.max_attempts - 1
+            if has_remaining_attempts and policy.delay > 0:
+                await asyncio.sleep(policy.delay)
+
+    raise last_error  # type: ignore[misc]
+
 
 
 def _cancel_downstream(

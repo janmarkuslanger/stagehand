@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from stagehand.core.workflow import AgentConfig, DynamicOutputs, OutputSpec, Task, Workflow
+from stagehand.core.workflow import AgentConfig, DynamicOutputs, OutputSpec, RetryPolicy, Task, Workflow
 from stagehand.core.scheduler import Scheduler
 from stagehand.ports.executor import AgentExecutor
 
@@ -58,6 +58,7 @@ class WorkflowBuilder:
         after: Optional[list[str]] = None,
         outputs: Optional[OutputSpec] = None,
         secrets: Optional[list[str]] = None,
+        retry: Optional[RetryPolicy] = None,
     ) -> "WorkflowBuilder":
         """Add a task node to the DAG."""
         self._tasks[task_id] = Task(
@@ -66,6 +67,7 @@ class WorkflowBuilder:
             depends_on=after or [],
             outputs=outputs or DynamicOutputs(),
             secrets=secrets or [],
+            retry=retry or RetryPolicy(),
         )
         return self
 
