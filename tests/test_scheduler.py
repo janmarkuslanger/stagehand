@@ -118,6 +118,8 @@ def test_retry_policy_rejects_invalid_max_attempts():
         RetryPolicy(max_attempts=0)
     with pytest.raises(ValueError, match="max_attempts"):
         RetryPolicy(max_attempts=-1)
+    with pytest.raises(ValueError, match="max_attempts"):
+        RetryPolicy(max_attempts=True)
 
 
 def test_retry_policy_rejects_negative_delay():
