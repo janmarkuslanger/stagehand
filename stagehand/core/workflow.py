@@ -38,6 +38,13 @@ OutputSpec = Union[StaticOutputs, DynamicOutputs, PatternOutputs]
 
 
 @dataclass
+class RetryPolicy:
+    """Controls if and how a failed task is retried."""
+    max_attempts: int = 1
+    delay: float = 0.0
+
+
+@dataclass
 class Task:
     """A single node in the workflow DAG."""
     agent_id: str = ""
@@ -45,6 +52,7 @@ class Task:
     prompt: str = ""
     outputs: OutputSpec = field(default_factory=DynamicOutputs)
     secrets: list[str] = field(default_factory=list)
+    retry: RetryPolicy = field(default_factory=RetryPolicy)
 
 
 @dataclass

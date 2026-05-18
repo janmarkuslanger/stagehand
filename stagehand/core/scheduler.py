@@ -108,31 +108,40 @@ class Scheduler:
 
         async def _run_task(task_id: str) -> None:
             task = workflow.tasks[task_id]
-            try:
-                prompt = resolve(task.prompt, run_context)
-                agent = workflow.agents[task.agent_id]
-                executor = agent.executor or self.default_executor
-                if executor is None:
-                    raise RuntimeError(
-                        f"task {task_id}: agent {task.agent_id!r} has no executor set"
-                    )
-                request = ExecutionRequest(
-                    system_prompt=agent.system_prompt,
-                    model=agent.model,
-                    tools=agent.tools,
-                    prompt=prompt,
-                    run_id=run_context.run_id,
-                    task_id=task_id,
-                )
-                exec_result = await executor.execute(request)
-                await outcome_queue.put(
-                    _TaskOutcome(
+            policy = task.retry
+            last_error: Optional[Exception] = None
+
+            for attempt in range(policy.max_attempts):
+                try:
+                    prompt = resolve(task.prompt, run_context)
+                    agent = workflow.agents[task.agent_id]
+                    executor = agent.executor or self.default_executor
+                    if executor is None:
+                        raise RuntimeError(
+                            f"task {task_id}: agent {task.agent_id!r} has no executor set"
+                        )
+                    request = ExecutionRequest(
+                        system_prompt=agent.system_prompt,
+                        model=agent.model,
+                        tools=agent.tools,
+                        prompt=prompt,
+                        run_id=run_context.run_id,
                         task_id=task_id,
-                        result=TaskResult(output=exec_result.output, files=exec_result.files),
                     )
-                )
-            except Exception as exc:
-                await outcome_queue.put(_TaskOutcome(task_id=task_id, error=exc))
+                    exec_result = await executor.execute(request)
+                    await outcome_queue.put(
+                        _TaskOutcome(
+                            task_id=task_id,
+                            result=TaskResult(output=exec_result.output, files=exec_result.files),
+                        )
+                    )
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < policy.max_attempts - 1 and policy.delay > 0:
+                        await asyncio.sleep(policy.delay)
+
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=last_error))
 
         for task_id in workflow.tasks:
             if in_degree[task_id] == 0 and phases[task_id] == TaskPhase.WAITING:

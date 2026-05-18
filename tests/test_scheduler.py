@@ -6,7 +6,7 @@ import pytest
 from stagehand.core.context import RunContext
 from stagehand.core.runstate import TaskStatus, load_state, save
 from stagehand.core.scheduler import Scheduler
-from stagehand.core.workflow import AgentConfig, Task, TaskResult, Workflow
+from stagehand.core.workflow import AgentConfig, RetryPolicy, Task, TaskResult, Workflow
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
 
 
@@ -110,6 +110,61 @@ async def test_no_executor_raises():
     )
     with pytest.raises(RuntimeError, match="no executor set"):
         await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
+
+@pytest.mark.asyncio
+async def test_retry_succeeds_after_transient_failure():
+    attempts: list[str] = []
+
+    class FlakyExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            attempts.append(request.task_id)
+            if len(attempts) < 2:
+                raise RuntimeError("transient failure")
+            return ExecutionResult(output="ok", files=[])
+
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="do it", retry=RetryPolicy(max_attempts=3))},
+        FlakyExecutor(),
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_exhausted_raises():
+    attempts: list[str] = []
+
+    class AlwaysFailExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            attempts.append(request.task_id)
+            raise RuntimeError("permanent failure")
+
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="do it", retry=RetryPolicy(max_attempts=3))},
+        AlwaysFailExecutor(),
+    )
+    with pytest.raises(RuntimeError, match="permanent failure"):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert len(attempts) == 3
+
+
+@pytest.mark.asyncio
+async def test_no_retry_by_default():
+    attempts: list[str] = []
+
+    class AlwaysFailExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            attempts.append(request.task_id)
+            raise RuntimeError("fail")
+
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="do it")},
+        AlwaysFailExecutor(),
+    )
+    with pytest.raises(RuntimeError):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert len(attempts) == 1
 
 
 @pytest.mark.asyncio
