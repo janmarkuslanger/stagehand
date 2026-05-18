@@ -112,6 +112,18 @@ async def test_no_executor_raises():
         await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
 
 
+def test_retry_policy_rejects_invalid_max_attempts():
+    with pytest.raises(ValueError, match="max_attempts"):
+        RetryPolicy(max_attempts=0)
+    with pytest.raises(ValueError, match="max_attempts"):
+        RetryPolicy(max_attempts=-1)
+
+
+def test_retry_policy_rejects_negative_delay():
+    with pytest.raises(ValueError, match="delay"):
+        RetryPolicy(delay=-1.0)
+
+
 @pytest.mark.asyncio
 async def test_retry_succeeds_after_transient_failure():
     attempts: list[str] = []

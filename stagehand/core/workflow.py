@@ -43,6 +43,12 @@ class RetryPolicy:
     max_attempts: int = 1
     delay: float = 0.0
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.max_attempts, int) or self.max_attempts < 1:
+            raise ValueError(f"RetryPolicy.max_attempts must be an integer >= 1, got {self.max_attempts!r}")
+        if self.delay < 0:
+            raise ValueError(f"RetryPolicy.delay must be non-negative, got {self.delay!r}")
+
 
 @dataclass
 class Task:
