@@ -105,12 +105,12 @@ class ClaudeExecutor(AgentExecutor):
                             "content": result_content,
                         }
                     )
-                except Exception as exc:
+                except Exception as error:
                     tool_results.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": str(exc),
+                            "content": str(error),
                             "is_error": True,
                         }
                     )

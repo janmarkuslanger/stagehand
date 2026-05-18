@@ -81,12 +81,12 @@ class OllamaExecutor(AgentExecutor):
                             "content": result_content,
                         }
                     )
-                except Exception as exc:
+                except Exception as error:
                     tool_results.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": str(exc),
+                            "content": str(error),
                         }
                     )
 

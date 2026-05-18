@@ -25,7 +25,7 @@ class TaskPhase(Enum):
 class _TaskOutcome:
     task_id: str
     result: Optional[TaskResult] = None
-    error: Optional[Exception] = None
+    erroror: Optional[Exception] = None
 
 
 class Scheduler:
@@ -52,11 +52,11 @@ class Scheduler:
         """Runs all tasks in the workflow. Returns the run_id."""
         run_id = generate_run_id()
         run_context = RunContext(run_id=run_id, inputs=inputs or {})
-        err = await self._execute(workflow, run_context)
-        state = build_run_state(run_id, run_label, workflow, inputs or {}, run_context, err)
+        error = await self._execute(workflow, run_context)
+        state = build_run_state(run_id, run_label, workflow, inputs or {}, run_context, error)
         save(state, self.run_state_directory)
-        if err is not None:
-            raise err
+        if error is not None:
+            raise error
         return run_id
 
     async def resume(self, run_id: str, workflow: Workflow) -> str:
@@ -74,11 +74,11 @@ class Scheduler:
                     TaskResult(output=task_state.output, files=task_state.files),
                 )
 
-        err = await self._execute(workflow, run_context)
-        new_state = build_run_state(run_id, state.workflow_file, workflow, state.inputs, run_context, err)
+        error = await self._execute(workflow, run_context)
+        new_state = build_run_state(run_id, state.workflow_file, workflow, state.inputs, run_context, error)
         save(new_state, self.run_state_directory)
-        if err is not None:
-            raise err
+        if error is not None:
+            raise error
         return run_id
 
     async def _execute(self, workflow: Workflow, run_context: RunContext) -> Optional[Exception]:
@@ -110,15 +110,15 @@ class Scheduler:
             if in_degree[task_id] == 0 and phases[task_id] == TaskPhase.WAITING:
                 launch(task_id)
 
-        first_error: Optional[Exception] = None
+        first_erroror: Optional[Exception] = None
 
         while running_count > 0:
             outcome = await outcome_queue.get()
             running_count -= 1
 
-            if outcome.error is not None:
-                if first_error is None:
-                    first_error = outcome.error
+            if outcome.erroror is not None:
+                if first_erroror is None:
+                    first_erroror = outcome.erroror
                 phases[outcome.task_id] = TaskPhase.FAILED
                 _cancel_downstream(outcome.task_id, graph, phases)
             else:
@@ -132,7 +132,7 @@ class Scheduler:
                     if in_degree[dependent_id] == 0:
                         launch(dependent_id)
 
-        return first_error
+        return first_erroror
 
     async def _run_task(
         self,
@@ -145,8 +145,8 @@ class Scheduler:
         agent = workflow.agents[task.agent_id]
         executor = agent.executor or self.default_executor
         if executor is None:
-            err = RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
-            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=err))
+            error = RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, erroror=error))
             return
 
         request = ExecutionRequest(
@@ -160,8 +160,8 @@ class Scheduler:
 
         try:
             exec_result = await _execute_with_retry(executor, request, task.retry)
-        except Exception as exc:
-            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=exc))
+        except Exception as erroror:
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, erroror=erroror))
             return
 
         await outcome_queue.put(
@@ -174,18 +174,18 @@ async def _execute_with_retry(
     request: ExecutionRequest,
     policy: RetryPolicy,
 ) -> ExecutionResult:
-    last_error: Optional[Exception] = None
+    last_erroror: Optional[Exception] = None
 
     for attempt in range(policy.max_attempts):
         try:
             return await executor.execute(request)
-        except Exception as exc:
-            last_error = exc
+        except Exception as erroror:
+            last_erroror = erroror
             has_remaining_attempts = attempt < policy.max_attempts - 1
             if has_remaining_attempts and policy.delay > 0:
                 await asyncio.sleep(policy.delay)
 
-    raise last_error  # type: ignore[misc]
+    raise last_erroror  # type: ignore[misc]
 
 
 

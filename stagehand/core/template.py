@@ -20,8 +20,8 @@ def resolve(template: str, context: "RunContext") -> str:  # type: ignore[name-d
         expression = match.group(1).strip()
         try:
             return _resolve_expression(expression, context)
-        except ValueError as exc:
-            errors.append(str(exc))
+        except ValueError as error:
+            errors.append(str(error))
             return match.group(0)
 
     result = _TEMPLATE_PATTERN.sub(replacer, template)
