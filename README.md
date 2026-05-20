@@ -145,6 +145,63 @@ from stagehand import RetryPolicy
 
 ---
 
+### Logging
+
+By default the scheduler is silent. Pass a `Logger` to see workflow and task lifecycle events.
+
+```python
+import logging
+from stagehand import WorkflowBuilder, StdlibLogger
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+run_id = await (
+    WorkflowBuilder("my-pipeline")
+    .agent("worker", executor, model="claude-opus-4-5")
+    .task("analyse", agent="worker", prompt="...")
+    .logger(StdlibLogger())   # <-- add this
+    .run()
+)
+```
+
+`StdlibLogger` wraps Python's stdlib `logging` module and, by default, raises `httpx` and `httpcore` to `WARNING` so their per-request `INFO` lines don't drown out workflow events.
+
+```
+INFO  workflow 'my-pipeline' started [run=sh-20260520-a1b2]
+INFO  task 'analyse' starting
+INFO  task 'analyse' done
+INFO  workflow 'my-pipeline' finished [run=sh-20260520-a1b2]
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `name` | `"stagehand"` | Logger name used with `logging.getLogger` |
+| `suppress_http_logs` | `True` | Raises httpx/httpcore to WARNING to suppress per-request noise |
+
+To silence everything, omit `.logger()` (the default) or pass `NullLogger()` explicitly.
+
+When using `Scheduler` directly, pass the logger to its constructor:
+
+```python
+from stagehand import Scheduler, StdlibLogger
+
+scheduler = Scheduler(run_state_directory=".stagehand/runs", logger=StdlibLogger())
+```
+
+To write a custom logger — for example to route events to a structured sink — implement the `Logger` port:
+
+```python
+from stagehand import Logger
+
+class MyLogger(Logger):
+    def debug(self, message: str) -> None: ...
+    def info(self, message: str) -> None: ...
+    def warning(self, message: str) -> None: ...
+    def error(self, message: str) -> None: ...
+```
+
+---
+
 ### Template expressions
 
 Prompts support `{{ }}` expressions to inject values from previous tasks or runtime inputs.

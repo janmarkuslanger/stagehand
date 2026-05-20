@@ -2,6 +2,7 @@
 
 from stagehand.adapters.executor.claude import ClaudeExecutor, ToolDefinition
 from stagehand.adapters.executor.ollama import OllamaExecutor
+from stagehand.adapters.logger import NullLogger, StdlibLogger
 from stagehand.adapters.secrets.env import EnvSecretProvider
 from stagehand.adapters.storage.filesystem import FilesystemStorage
 from stagehand.builder import WorkflowBuilder
@@ -20,6 +21,7 @@ from stagehand.core.workflow import (
     Workflow,
 )
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.ports.logger import Logger
 from stagehand.ports.secrets import SecretProvider
 from stagehand.ports.storage import ArtifactStorage
 
@@ -49,10 +51,13 @@ __all__ = [
     "ExecutionRequest",
     "ExecutionResult",
     "ArtifactStorage",
+    "Logger",
     "SecretProvider",
     # Adapters
     "ClaudeExecutor",
     "OllamaExecutor",
+    "StdlibLogger",
+    "NullLogger",
     "FilesystemStorage",
     "EnvSecretProvider",
     "ToolDefinition",

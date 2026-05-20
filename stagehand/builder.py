@@ -5,6 +5,7 @@ from typing import Callable, Optional
 from stagehand.core.workflow import AgentConfig, DynamicOutputs, OutputSpec, RetryPolicy, Task, Workflow
 from stagehand.core.scheduler import Scheduler
 from stagehand.ports.executor import AgentExecutor
+from stagehand.ports.logger import Logger
 
 
 class WorkflowBuilder:
@@ -28,6 +29,7 @@ class WorkflowBuilder:
         self._agents: dict[str, AgentConfig] = {}
         self._tasks: dict[str, Task] = {}
         self._state_dir = ".stagehand/runs"
+        self._logger: Optional[Logger] = None
 
     def agent(
         self,
@@ -82,6 +84,11 @@ class WorkflowBuilder:
         self._state_dir = directory
         return self
 
+    def logger(self, logger: Logger) -> "WorkflowBuilder":
+        """Attach a logger that receives workflow and task lifecycle events."""
+        self._logger = logger
+        return self
+
     def build(self) -> Workflow:
         """Returns the Workflow without running it."""
         self._validate()
@@ -95,7 +102,7 @@ class WorkflowBuilder:
     async def run(self, inputs: Optional[dict[str, str]] = None) -> str:
         """Build and run the workflow. Returns the run_id."""
         workflow = self.build()
-        scheduler = Scheduler(run_state_directory=self._state_dir)
+        scheduler = Scheduler(run_state_directory=self._state_dir, logger=self._logger)
         return await scheduler.run(workflow, inputs=inputs or {})
 
     def _validate(self) -> None:
