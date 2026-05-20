@@ -116,6 +116,16 @@ def test_build_validates_unknown_agent():
         WorkflowBuilder("bad").task("t1", agent="ghost", prompt="hi").build()
 
 
+def test_build_rejects_fn_and_agent_together():
+    with pytest.raises(ValueError, match="not both"):
+        (
+            WorkflowBuilder("bad")
+            .agent("a", StubExecutor())
+            .task("t1", agent="a", prompt="hi", fn=lambda ctx: "x")
+            .build()
+        )
+
+
 def test_build_validates_unknown_dependency():
     ex = StubExecutor()
     with pytest.raises(ValueError, match="unknown task"):

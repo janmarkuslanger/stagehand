@@ -102,6 +102,10 @@ class WorkflowBuilder:
         if not self._name:
             raise ValueError("WorkflowBuilder: workflow name is required")
         for task_id, task in self._tasks.items():
+            if task.fn is not None and (task.agent_id or task.prompt):
+                raise ValueError(
+                    f"WorkflowBuilder: task {task_id!r} must use either 'fn' or 'agent'/'prompt', not both"
+                )
             if task.fn is None:
                 if not task.agent_id:
                     raise ValueError(
