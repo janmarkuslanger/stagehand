@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import anthropic
 
+from stagehand.adapters.logger import NullLogger
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.ports.logger import Logger
 from stagehand.ports.storage import ArtifactStorage
 
 MAX_AGENT_STEPS = 20
@@ -36,10 +39,16 @@ class ClaudeExecutor(AgentExecutor):
         api_key: Optional[str] = None,
         storage: Optional[ArtifactStorage] = None,
         extra_tools: Optional[list[ToolDefinition]] = None,
+        rate_limit_retries: int = 3,
+        rate_limit_delay: float = 60.0,
+        logger: Optional[Logger] = None,
     ) -> None:
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.storage = storage
         self.extra_tools: list[ToolDefinition] = extra_tools or []
+        self.rate_limit_retries = rate_limit_retries
+        self.rate_limit_delay = rate_limit_delay
+        self._logger: Logger = logger or NullLogger()
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         model = request.model or DEFAULT_MODEL
@@ -65,19 +74,7 @@ class ClaudeExecutor(AgentExecutor):
         last_stop_reason: Optional[str] = None
 
         for step in range(MAX_AGENT_STEPS):
-            resp = await self.client.messages.create(
-                model=model,
-                max_tokens=16000,
-                system=[
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=messages,
-                tools=all_tools if all_tools else [],
-            )
+            resp = await self._create_with_retry(model, system_prompt, messages, all_tools)
 
             last_stop_reason = resp.stop_reason
 
@@ -123,6 +120,37 @@ class ClaudeExecutor(AgentExecutor):
             )
 
         return ExecutionResult(output=final_output, files=written_files)
+
+    async def _create_with_retry(
+        self,
+        model: str,
+        system_prompt: str,
+        messages: list[anthropic.types.MessageParam],
+        tools: list[anthropic.types.ToolParam],
+    ) -> anthropic.types.Message:
+        total = self.rate_limit_retries
+        for attempt in range(1, total + 1):
+            try:
+                return await self.client.messages.create(
+                    model=model,
+                    max_tokens=16000,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": system_prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=messages,
+                    tools=tools if tools else [],
+                )
+            except anthropic.RateLimitError:
+                if attempt == total:
+                    raise
+                self._logger.warning(
+                    f"Rate limit (429) on attempt {attempt}/{total} — sleeping {self.rate_limit_delay}s"
+                )
+                await asyncio.sleep(self.rate_limit_delay)
 
     async def _dispatch_tool(
         self,

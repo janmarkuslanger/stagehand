@@ -275,6 +275,27 @@ executor = ClaudeExecutor(
 
 The default model is `claude-opus-4-5`.
 
+#### Rate-limit retries
+
+`ClaudeExecutor` automatically retries `messages.create` calls that receive a 429 response. Only the individual API call is retried — not the entire agentic loop — so a rate-limit mid-task retries only the current step.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `rate_limit_retries` | `3` | Maximum number of attempts per `messages.create` call (1 = no retries). |
+| `rate_limit_delay` | `60.0` | Seconds to wait between attempts. |
+| `logger` | `NullLogger()` | A `Logger` instance (e.g. `StdlibLogger()`) to receive retry warnings. |
+
+```python
+from stagehand.adapters.logger import StdlibLogger
+
+executor = ClaudeExecutor(
+    api_key="sk-ant-...",
+    rate_limit_retries=5,
+    rate_limit_delay=30.0,
+    logger=StdlibLogger(),
+)
+```
+
 ### Custom tools
 
 Pass extra tools to `ClaudeExecutor` via `extra_tools`:
