@@ -318,3 +318,127 @@ async def test_resume_skips_completed():
     err = await Scheduler(run_state_directory=tmpdir)._execute(wf, run_context)
     assert err is None
     assert call_count["n"] == count_before + 1
+
+
+# ---------------------------------------------------------------------------
+# fn-task tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fn_task_sync():
+    def fetch_tickets(ctx):
+        return "TICKET-1, TICKET-2"
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"fetch": Task(fn=fetch_tickets)},
+    )
+    scheduler = Scheduler(run_state_directory=tempfile.mkdtemp())
+    run_id = await scheduler.run(wf)
+    assert run_id.startswith("sh-")
+
+
+@pytest.mark.asyncio
+async def test_fn_task_async():
+    async def fetch_tickets(ctx):
+        return "TICKET-1"
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"fetch": Task(fn=fetch_tickets)},
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
+
+@pytest.mark.asyncio
+async def test_fn_task_returns_task_result():
+    def fetch(ctx):
+        return TaskResult(output="done", files=["out.txt"])
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"fetch": Task(fn=fetch)},
+    )
+    run_context = RunContext(run_id="test-run", inputs={})
+    err = await Scheduler(run_state_directory=tempfile.mkdtemp())._execute(wf, run_context)
+    assert err is None
+    result = run_context.get_task_result("fetch")
+    assert result.output == "done"
+    assert result.files == ["out.txt"]
+
+
+@pytest.mark.asyncio
+async def test_fn_task_receives_context():
+    captured = {}
+
+    def fetch(ctx):
+        captured["run_id"] = ctx.run_id
+        captured["ticket"] = ctx._inputs.get("ticket_id")
+        return "ok"
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"fetch": Task(fn=fetch)},
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf, inputs={"ticket_id": "XYZ-1"})
+    assert captured["ticket"] == "XYZ-1"
+
+
+@pytest.mark.asyncio
+async def test_fn_task_output_available_to_downstream_agent():
+    def fetch(ctx):
+        return "tickets: A, B, C"
+
+    executor = RecordingExecutor()
+    wf = Workflow(
+        name="test",
+        agents={"a": AgentConfig(executor=executor, tools=[])},
+        tasks={
+            "fetch": Task(fn=fetch),
+            "analyze": Task(agent_id="a", prompt="{{ tasks.fetch }}", depends_on=["fetch"]),
+        },
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert "analyze" in executor.order
+
+
+@pytest.mark.asyncio
+async def test_fn_task_failure_cancels_downstream():
+    def broken(ctx):
+        raise RuntimeError("api down")
+
+    executor = RecordingExecutor()
+    wf = Workflow(
+        name="test",
+        agents={"a": AgentConfig(executor=executor, tools=[])},
+        tasks={
+            "fetch": Task(fn=broken),
+            "analyze": Task(agent_id="a", prompt="go", depends_on=["fetch"]),
+        },
+    )
+    with pytest.raises(RuntimeError, match="api down"):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert "analyze" not in executor.order
+
+
+@pytest.mark.asyncio
+async def test_fn_task_retry():
+    calls = []
+
+    def flaky(ctx):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("transient")
+        return "ok"
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"fetch": Task(fn=flaky, retry=RetryPolicy(max_attempts=3))},
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert len(calls) == 3
