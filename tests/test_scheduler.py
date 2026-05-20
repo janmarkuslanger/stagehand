@@ -442,3 +442,4 @@ async def test_fn_task_retry():
     )
     await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
     assert len(calls) == 3
+
