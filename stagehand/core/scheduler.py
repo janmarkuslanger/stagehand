@@ -211,10 +211,9 @@ async def _call_fn_with_retry(
 
     for attempt in range(policy.max_attempts):
         try:
-            if inspect.iscoroutinefunction(fn):
-                raw = await fn(run_context)
-            else:
-                raw = fn(run_context)
+            raw = fn(run_context)
+            if inspect.isawaitable(raw):
+                raw = await raw
             if isinstance(raw, TaskResult):
                 return raw
             return TaskResult(output=str(raw))
