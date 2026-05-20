@@ -12,6 +12,7 @@ from stagehand.core.runstate import build_run_state, generate_run_id, load_state
 from stagehand.core.template import resolve
 from stagehand.core.workflow import RetryPolicy, TaskResult, Workflow
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.ports.logger import Logger
 
 
 class TaskPhase(Enum):
@@ -29,6 +30,13 @@ class _TaskOutcome:
     error: Optional[Exception] = None
 
 
+class _NullLogger(Logger):
+    def debug(self, message: str) -> None: ...
+    def info(self, message: str) -> None: ...
+    def warning(self, message: str) -> None: ...
+    def error(self, message: str) -> None: ...
+
+
 class Scheduler:
     """Executes a Workflow's tasks in dependency order, running independent tasks in parallel.
 
@@ -40,9 +48,11 @@ class Scheduler:
         self,
         default_executor: Optional[AgentExecutor] = None,
         run_state_directory: str = ".stagehand/runs",
+        logger: Optional[Logger] = None,
     ) -> None:
         self.default_executor = default_executor
         self.run_state_directory = run_state_directory
+        self._logger: Logger = logger or _NullLogger()
 
     async def run(
         self,
@@ -83,6 +93,8 @@ class Scheduler:
         return run_id
 
     async def _execute(self, workflow: Workflow, run_context: RunContext) -> Optional[Exception]:
+        self._logger.info(f"workflow '{workflow.name}' started [run={run_context.run_id}]")
+
         graph = build_graph(workflow)
 
         in_degree: dict[str, int] = {
@@ -124,7 +136,7 @@ class Scheduler:
                 if first_error is None:
                     first_error = outcome.error
                 phases[outcome.task_id] = TaskPhase.FAILED
-                _cancel_downstream(outcome.task_id, graph, phases)
+                _cancel_downstream(outcome.task_id, graph, phases, self._logger)
             else:
                 phases[outcome.task_id] = TaskPhase.DONE
                 await run_context.set_task_result(outcome.task_id, outcome.result)  # type: ignore[arg-type]
@@ -136,6 +148,13 @@ class Scheduler:
                     if in_degree[dependent_id] == 0:
                         launch(dependent_id)
 
+        if first_error is not None:
+            self._logger.error(
+                f"workflow '{workflow.name}' failed: {first_error} [run={run_context.run_id}]"
+            )
+        else:
+            self._logger.info(f"workflow '{workflow.name}' finished [run={run_context.run_id}]")
+
         return first_error
 
     async def _run_task(
@@ -145,14 +164,17 @@ class Scheduler:
         run_context: RunContext,
         outcome_queue: asyncio.Queue[_TaskOutcome],
     ) -> None:
+        self._logger.info(f"task '{task_id}' starting")
         task = workflow.tasks[task_id]
 
         if task.fn is not None:
             try:
-                result = await _call_fn_with_retry(task.fn, run_context, task.retry)
+                result = await _call_fn_with_retry(task.fn, run_context, task.retry, task_id, self._logger)
             except Exception as error:
+                self._logger.error(f"task '{task_id}' failed: {error}")
                 await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
                 return
+            self._logger.info(f"task '{task_id}' done")
             await outcome_queue.put(_TaskOutcome(task_id=task_id, result=result))
             return
 
@@ -160,6 +182,7 @@ class Scheduler:
         executor = agent.executor or self.default_executor
         if executor is None:
             error = RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
+            self._logger.error(f"task '{task_id}' failed: {error}")
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
             return
 
@@ -172,11 +195,13 @@ class Scheduler:
                 run_id=run_context.run_id,
                 task_id=task_id,
             )
-            exec_result = await _execute_with_retry(executor, request, task.retry)
+            exec_result = await _execute_with_retry(executor, request, task.retry, self._logger)
         except Exception as error:
+            self._logger.error(f"task '{task_id}' failed: {error}")
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
             return
 
+        self._logger.info(f"task '{task_id}' done")
         await outcome_queue.put(
             _TaskOutcome(task_id=task_id, result=TaskResult(output=exec_result.output, files=exec_result.files))
         )
@@ -186,6 +211,7 @@ async def _execute_with_retry(
     executor: AgentExecutor,
     request: ExecutionRequest,
     policy: RetryPolicy,
+    logger: Logger,
 ) -> ExecutionResult:
     last_error: Optional[Exception] = None
 
@@ -195,17 +221,23 @@ async def _execute_with_retry(
         except Exception as error:
             last_error = error
             has_remaining_attempts = attempt < policy.max_attempts - 1
-            if has_remaining_attempts and policy.delay > 0:
-                await asyncio.sleep(policy.delay)
+            if has_remaining_attempts:
+                delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
+                logger.warning(
+                    f"task '{request.task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {error}{delay_suffix}"
+                )
+                if policy.delay > 0:
+                    await asyncio.sleep(policy.delay)
 
     raise last_error  # type: ignore[misc]
-
 
 
 async def _call_fn_with_retry(
     fn: Callable,
     run_context: RunContext,
     policy: RetryPolicy,
+    task_id: str,
+    logger: Logger,
 ) -> TaskResult:
     last_error: Optional[Exception] = None
 
@@ -220,8 +252,13 @@ async def _call_fn_with_retry(
         except Exception as error:
             last_error = error
             has_remaining_attempts = attempt < policy.max_attempts - 1
-            if has_remaining_attempts and policy.delay > 0:
-                await asyncio.sleep(policy.delay)
+            if has_remaining_attempts:
+                delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
+                logger.warning(
+                    f"task '{task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {error}{delay_suffix}"
+                )
+                if policy.delay > 0:
+                    await asyncio.sleep(policy.delay)
 
     raise last_error  # type: ignore[misc]
 
@@ -230,8 +267,10 @@ def _cancel_downstream(
     task_id: str,
     graph: "Graph",  # type: ignore[name-defined]
     phases: dict[str, TaskPhase],
+    logger: Logger,
 ) -> None:
     for dependent_id in graph.dependents(task_id):
         if phases[dependent_id] == TaskPhase.WAITING:
             phases[dependent_id] = TaskPhase.CANCELLED
-            _cancel_downstream(dependent_id, graph, phases)
+            logger.info(f"task '{dependent_id}' cancelled (upstream '{task_id}' failed)")
+            _cancel_downstream(dependent_id, graph, phases, logger)
