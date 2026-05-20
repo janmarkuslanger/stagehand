@@ -4,7 +4,7 @@ import asyncio
 import inspect
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Callable, Optional
 
 from stagehand.core.context import RunContext
 from stagehand.core.graph import build_graph
@@ -203,7 +203,7 @@ async def _execute_with_retry(
 
 
 async def _call_fn_with_retry(
-    fn: "Callable",  # type: ignore[name-defined]
+    fn: Callable,
     run_context: RunContext,
     policy: RetryPolicy,
 ) -> TaskResult:
