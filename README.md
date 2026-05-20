@@ -314,6 +314,33 @@ my_tool = ToolDefinition(
 executor = ClaudeExecutor(api_key="...", extra_tools=[my_tool])
 ```
 
+### Artifact path validation
+
+`FilesystemStorage` always rejects paths that contain `..` components to prevent path traversal attacks.
+
+Optionally restrict which file extensions are allowed by passing `allowed_extensions`:
+
+```python
+from stagehand import FilesystemStorage
+
+# Only .txt and .md files may be written
+storage = FilesystemStorage("./output", allowed_extensions=[".txt", ".md"])
+```
+
+Extension matching is case-insensitive. Any path that violates a constraint raises `ValueError`
+before any I/O is performed. Implement `validate_path` on a custom `ArtifactStorage` subclass
+to apply your own rules:
+
+```python
+from stagehand import ArtifactStorage
+
+class MyStorage(ArtifactStorage):
+    def validate_path(self, path: str) -> None:
+        if not path.startswith("safe/"):
+            raise ValueError(f"path must be inside safe/: {path!r}")
+    ...
+```
+
 ### Custom executor
 
 Implement `AgentExecutor` to add any backend:
