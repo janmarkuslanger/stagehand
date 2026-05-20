@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic
@@ -8,6 +7,27 @@ import pytest
 
 from stagehand.adapters.executor.claude import ClaudeExecutor
 from stagehand.ports.executor import ExecutionRequest
+from stagehand.ports.logger import Logger
+
+
+class CapturingLogger(Logger):
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def debug(self, message: str) -> None:
+        self.records.append(("debug", message))
+
+    def info(self, message: str) -> None:
+        self.records.append(("info", message))
+
+    def warning(self, message: str) -> None:
+        self.records.append(("warning", message))
+
+    def error(self, message: str) -> None:
+        self.records.append(("error", message))
+
+    def has(self, level: str, fragment: str) -> bool:
+        return any(level == lvl and fragment in msg for lvl, msg in self.records)
 
 
 def _make_text_response(text: str = "done") -> MagicMock:
@@ -125,10 +145,9 @@ async def test_rate_limit_only_retries_current_step_not_full_loop():
 
 
 @pytest.mark.asyncio
-async def test_warning_logged_on_retry(caplog):
-    import logging
-
-    executor = ClaudeExecutor(api_key="test", rate_limit_retries=3, rate_limit_delay=0.0)
+async def test_warning_logged_on_retry():
+    log = CapturingLogger()
+    executor = ClaudeExecutor(api_key="test", rate_limit_retries=3, rate_limit_delay=0.0, logger=log)
 
     call_count = 0
 
@@ -145,9 +164,8 @@ async def test_warning_logged_on_retry(caplog):
 
     executor.client.messages.create = flaky
 
-    with caplog.at_level(logging.WARNING, logger="stagehand.adapters.executor.claude"):
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            await executor.execute(_make_request())
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await executor.execute(_make_request())
 
-    assert any("Rate limit (429)" in r.message for r in caplog.records)
-    assert any("1/3" in r.message for r in caplog.records)
+    assert log.has("warning", "Rate limit (429)")
+    assert log.has("warning", "1/3")

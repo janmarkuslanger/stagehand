@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import anthropic
 
+from stagehand.adapters.logger import NullLogger
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.ports.logger import Logger
 from stagehand.ports.storage import ArtifactStorage
-
-log = logging.getLogger(__name__)
 
 MAX_AGENT_STEPS = 20
 DEFAULT_MODEL = "claude-opus-4-5"
@@ -42,12 +41,14 @@ class ClaudeExecutor(AgentExecutor):
         extra_tools: Optional[list[ToolDefinition]] = None,
         rate_limit_retries: int = 3,
         rate_limit_delay: float = 60.0,
+        logger: Optional[Logger] = None,
     ) -> None:
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.storage = storage
         self.extra_tools: list[ToolDefinition] = extra_tools or []
         self.rate_limit_retries = rate_limit_retries
         self.rate_limit_delay = rate_limit_delay
+        self._logger: Logger = logger or NullLogger()
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         model = request.model or DEFAULT_MODEL
@@ -146,11 +147,8 @@ class ClaudeExecutor(AgentExecutor):
             except anthropic.RateLimitError:
                 if attempt == total:
                     raise
-                log.warning(
-                    "Rate limit (429) on attempt %d/%d — sleeping %gs",
-                    attempt,
-                    total,
-                    self.rate_limit_delay,
+                self._logger.warning(
+                    f"Rate limit (429) on attempt {attempt}/{total} — sleeping {self.rate_limit_delay}s"
                 )
                 await asyncio.sleep(self.rate_limit_delay)
 
