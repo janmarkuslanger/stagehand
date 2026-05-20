@@ -47,6 +47,13 @@ async def test_read_missing_file():
 # validate_path tests
 # ---------------------------------------------------------------------------
 
+def test_absolute_path_rejected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        storage = FilesystemStorage(tmpdir)
+        with pytest.raises(ValueError, match="path traversal"):
+            storage.validate_path("/etc/passwd")
+
+
 def test_path_traversal_simple():
     with tempfile.TemporaryDirectory() as tmpdir:
         storage = FilesystemStorage(tmpdir)
@@ -98,3 +105,11 @@ async def test_write_calls_validate_path():
         storage = FilesystemStorage(tmpdir)
         with pytest.raises(ValueError, match="path traversal"):
             await storage.write("../escape.txt", b"bad")
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_absolute_path():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        storage = FilesystemStorage(tmpdir)
+        with pytest.raises(ValueError, match="path traversal"):
+            await storage.write("/tmp/escape.txt", b"bad")

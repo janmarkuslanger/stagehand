@@ -337,7 +337,7 @@ from stagehand import ArtifactStorage
 class MyStorage(ArtifactStorage):
     def validate_path(self, path: str) -> None:
         if not path.startswith("safe/"):
-            raise ValueError(f"path must be inside safe/: {path!r}")
+            raise ValueError(f"path must be inside safe/: {path!r}")  # raise to block the write
     ...
 ```
 

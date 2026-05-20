@@ -7,7 +7,7 @@ class ArtifactStorage(ABC):
     """Port: reads and writes task output files."""
 
     def validate_path(self, path: str) -> None:
-        """Override to reject or transform paths. Raise ValueError to block a write."""
+        """Override to reject disallowed paths. Raise ValueError to block a write."""
 
     @abstractmethod
     async def write(self, path: str, content: bytes) -> None: ...

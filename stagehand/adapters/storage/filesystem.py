@@ -27,8 +27,9 @@ class FilesystemStorage(ArtifactStorage):
         )
 
     def validate_path(self, path: str) -> None:
-        parts = path.replace("\\", "/").split("/")
-        if ".." in parts:
+        full = os.path.normpath(os.path.join(self.root, path))
+        root = os.path.abspath(self.root)
+        if os.path.commonpath([root, os.path.abspath(full)]) != root:
             raise ValueError(f"path traversal detected in path: {path!r}")
         if self._allowed_extensions is not None:
             _, ext = os.path.splitext(path)
