@@ -84,7 +84,9 @@ WorkflowBuilder("pipeline")
 
 ### Tasks
 
-A task is a single unit of work assigned to an agent. Tasks form the nodes of the DAG.
+A task is a single unit of work in the DAG. There are two kinds:
+
+**Agent task** — runs a prompt against an AI agent:
 
 ```python
 .task("draft",  agent="writer", prompt="Write a short intro to Python.")
@@ -93,14 +95,29 @@ A task is a single unit of work assigned to an agent. Tasks form the nodes of th
       after=["draft"])
 ```
 
-| Parameter | Required | Description |
-|---|---|---|
-| `agent` | yes | ID of the agent that runs this task |
-| `prompt` | yes | Message sent to the agent (supports `{{ }}` expressions) |
-| `after` | no | List of task IDs this task waits for |
-| `outputs` | no | `StaticOutputs`, `DynamicOutputs`, or `PatternOutputs` |
-| `secrets` | no | List of secret names to resolve at runtime |
-| `retry` | no | `RetryPolicy` — how many times to retry on failure |
+**Deterministic task** — runs a plain Python callable (sync or async). No agent or prompt needed:
+
+```python
+async def fetch_tickets(ctx):
+    return await linear_client.get_tickets()  # returns str or TaskResult
+
+.task("fetch", fn=fetch_tickets)
+.task("analyze", agent="analyst",
+      prompt="Tickets:\n\n{{ tasks.fetch }}\n\nSummarise.",
+      after=["fetch"])
+```
+
+The callable receives a `RunContext` (access to `inputs` and previous task results) and must return a `str` or `TaskResult`.
+
+| Parameter | Description |
+|---|---|
+| `agent` | ID of the agent that runs this task *(required unless `fn` is set)* |
+| `prompt` | Message sent to the agent (supports `{{ }}` expressions) *(required unless `fn` is set)* |
+| `fn` | Python callable to run directly *(required unless `agent`/`prompt` are set)* |
+| `after` | List of task IDs this task waits for |
+| `outputs` | `StaticOutputs`, `DynamicOutputs`, or `PatternOutputs` |
+| `secrets` | List of secret names to resolve at runtime |
+| `retry` | `RetryPolicy` — how many times to retry on failure |
 
 Tasks with no `after` (or whose dependencies are all complete) start immediately. Multiple ready tasks run in parallel.
 

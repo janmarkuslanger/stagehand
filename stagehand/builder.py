@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from stagehand.core.workflow import AgentConfig, DynamicOutputs, OutputSpec, RetryPolicy, Task, Workflow
 from stagehand.core.scheduler import Scheduler
@@ -53,17 +53,23 @@ class WorkflowBuilder:
         self,
         task_id: str,
         *,
-        agent: str,
-        prompt: str,
+        agent: Optional[str] = None,
+        prompt: str = "",
+        fn: Optional[Callable] = None,
         after: Optional[list[str]] = None,
         outputs: Optional[OutputSpec] = None,
         secrets: Optional[list[str]] = None,
         retry: Optional[RetryPolicy] = None,
     ) -> "WorkflowBuilder":
-        """Add a task node to the DAG."""
+        """Add a task node to the DAG.
+
+        Pass either ``agent`` + ``prompt`` for an AI-agent task, or ``fn`` for
+        a deterministic task that runs a plain Python callable.
+        """
         self._tasks[task_id] = Task(
-            agent_id=agent,
+            agent_id=agent or "",
             prompt=prompt,
+            fn=fn,
             depends_on=after or [],
             outputs=outputs or DynamicOutputs(),
             secrets=secrets or [],
@@ -96,10 +102,15 @@ class WorkflowBuilder:
         if not self._name:
             raise ValueError("WorkflowBuilder: workflow name is required")
         for task_id, task in self._tasks.items():
-            if task.agent_id not in self._agents:
-                raise ValueError(
-                    f"WorkflowBuilder: task {task_id!r} references unknown agent {task.agent_id!r}"
-                )
+            if task.fn is None:
+                if not task.agent_id:
+                    raise ValueError(
+                        f"WorkflowBuilder: task {task_id!r} requires either 'agent' or 'fn'"
+                    )
+                if task.agent_id not in self._agents:
+                    raise ValueError(
+                        f"WorkflowBuilder: task {task_id!r} references unknown agent {task.agent_id!r}"
+                    )
             for dep in task.depends_on:
                 if dep not in self._tasks:
                     raise ValueError(

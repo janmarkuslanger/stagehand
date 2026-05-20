@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional
@@ -145,6 +146,16 @@ class Scheduler:
         outcome_queue: asyncio.Queue[_TaskOutcome],
     ) -> None:
         task = workflow.tasks[task_id]
+
+        if task.fn is not None:
+            try:
+                result = await _call_fn_with_retry(task.fn, run_context, task.retry)
+            except Exception as error:
+                await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
+                return
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, result=result))
+            return
+
         agent = workflow.agents[task.agent_id]
         executor = agent.executor or self.default_executor
         if executor is None:
@@ -189,6 +200,31 @@ async def _execute_with_retry(
 
     raise last_error  # type: ignore[misc]
 
+
+
+async def _call_fn_with_retry(
+    fn: "Callable",  # type: ignore[name-defined]
+    run_context: RunContext,
+    policy: RetryPolicy,
+) -> TaskResult:
+    last_error: Optional[Exception] = None
+
+    for attempt in range(policy.max_attempts):
+        try:
+            if inspect.iscoroutinefunction(fn):
+                raw = await fn(run_context)
+            else:
+                raw = fn(run_context)
+            if isinstance(raw, TaskResult):
+                return raw
+            return TaskResult(output=str(raw))
+        except Exception as error:
+            last_error = error
+            has_remaining_attempts = attempt < policy.max_attempts - 1
+            if has_remaining_attempts and policy.delay > 0:
+                await asyncio.sleep(policy.delay)
+
+    raise last_error  # type: ignore[misc]
 
 
 def _cancel_downstream(

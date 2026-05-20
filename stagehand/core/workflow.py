@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 if TYPE_CHECKING:
     from stagehand.ports.executor import AgentExecutor
@@ -52,13 +52,20 @@ class RetryPolicy:
 
 @dataclass
 class Task:
-    """A single node in the workflow DAG."""
+    """A single node in the workflow DAG.
+
+    Either set ``agent_id`` + ``prompt`` to run an AI agent, or set ``fn`` to
+    run a plain Python callable.  ``fn`` receives a ``RunContext`` and must
+    return a ``TaskResult`` or a plain ``str``.  Both sync and async callables
+    are supported.
+    """
     agent_id: str = ""
     depends_on: list[str] = field(default_factory=list)
     prompt: str = ""
     outputs: OutputSpec = field(default_factory=DynamicOutputs)
     secrets: list[str] = field(default_factory=list)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
+    fn: Optional[Callable] = None
 
 
 @dataclass
