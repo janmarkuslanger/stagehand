@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import openai
 
-from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult, ToolDefinition
 from stagehand.ports.storage import ArtifactStorage
 
 MAX_AGENT_STEPS = 20
@@ -20,12 +20,14 @@ class OllamaExecutor(AgentExecutor):
         self,
         host: str = OLLAMA_DEFAULT_HOST,
         storage: Optional[ArtifactStorage] = None,
+        extra_tools: Optional[list[ToolDefinition]] = None,
     ) -> None:
         self.client = openai.AsyncOpenAI(
             base_url=f"{host}/v1",
             api_key="ollama",
         )
         self.storage = storage
+        self.extra_tools: list[ToolDefinition] = extra_tools or []
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         model = request.model or OLLAMA_DEFAULT_MODEL
@@ -35,7 +37,7 @@ class OllamaExecutor(AgentExecutor):
             messages.append({"role": "system", "content": request.system_prompt})
         messages.append({"role": "user", "content": request.prompt})
 
-        tools = _build_ollama_tools(request.tools)
+        tools = _build_ollama_tools(request.tools, self.extra_tools)
 
         final_output = ""
         written_files: list[str] = []
@@ -112,6 +114,14 @@ class OllamaExecutor(AgentExecutor):
             return await self._execute_read_file(task_id, raw_input)
         if name == "list_files":
             return await self._execute_list_files(task_id, raw_input)
+
+        for custom_tool in self.extra_tools:
+            if custom_tool.name == name:
+                result = custom_tool.handler(raw_input)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return str(result)
+
         raise ValueError(f"unknown tool {name!r}")
 
     async def _execute_write_file(
@@ -149,7 +159,10 @@ class OllamaExecutor(AgentExecutor):
         return "\n".join(files)
 
 
-def _build_ollama_tools(tool_names: list[str]) -> list[dict[str, Any]]:
+def _build_ollama_tools(
+    tool_names: list[str],
+    extra_tools: list[ToolDefinition],
+) -> list[dict[str, Any]]:
     available: dict[str, dict[str, Any]] = {
         "write_file": {
             "type": "function",
@@ -195,4 +208,16 @@ def _build_ollama_tools(tool_names: list[str]) -> list[dict[str, Any]]:
             },
         },
     }
-    return [available[name] for name in tool_names if name in available]
+    built_in = [available[name] for name in tool_names if name in available]
+    custom = [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.input_schema,
+            },
+        }
+        for t in extra_tools
+    ]
+    return built_in + custom

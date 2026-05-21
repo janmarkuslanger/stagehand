@@ -2,27 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import anthropic
 
 from stagehand.adapters.logger import NullLogger
-from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult, ToolDefinition
 from stagehand.ports.logger import Logger
 from stagehand.ports.storage import ArtifactStorage
 
 MAX_AGENT_STEPS = 20
 DEFAULT_MODEL = "claude-opus-4-5"
-
-
-@dataclass
-class ToolDefinition:
-    """A custom tool that can be passed to ClaudeExecutor."""
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-    handler: Callable[[dict[str, Any]], Any]
 
 
 class ClaudeExecutor(AgentExecutor):

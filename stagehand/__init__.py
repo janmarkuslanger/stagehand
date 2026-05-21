@@ -1,6 +1,6 @@
 """Stagehand — asyncio DAG workflow engine for AI agents."""
 
-from stagehand.adapters.executor.claude import ClaudeExecutor, ToolDefinition
+from stagehand.adapters.executor.claude import ClaudeExecutor
 from stagehand.adapters.executor.ollama import OllamaExecutor
 from stagehand.adapters.logger import NullLogger, StdlibLogger
 from stagehand.adapters.secrets.env import EnvSecretProvider
@@ -20,7 +20,7 @@ from stagehand.core.workflow import (
     TaskResult,
     Workflow,
 )
-from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult, ToolDefinition
 from stagehand.ports.logger import Logger
 from stagehand.ports.secrets import SecretProvider
 from stagehand.ports.storage import ArtifactStorage
