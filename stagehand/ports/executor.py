@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 
 @dataclass
@@ -18,6 +19,16 @@ class ExecutionRequest:
 class ExecutionResult:
     output: str = ""
     files: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ToolDefinition:
+    """A custom tool that can be passed to an executor."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    handler: Callable[[dict[str, Any]], Any]
 
 
 class AgentExecutor(ABC):
