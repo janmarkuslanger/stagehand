@@ -51,6 +51,7 @@ WorkflowBuilder(name, version="1")
   .agent(agent_id, executor, *, model, system_prompt, role, tools)
   .task(task_id, *, agent, prompt, fn, after, outputs, secrets, retry, timeout)
   .state_dir(directory)   # where run state is persisted (default: .stagehand/runs)
+  .concurrency(n)         # max tasks running simultaneously (default: unlimited)
   .run(inputs={})         # returns run_id
 ```
 

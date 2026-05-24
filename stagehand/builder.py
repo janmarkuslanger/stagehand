@@ -30,6 +30,7 @@ class WorkflowBuilder:
         self._tasks: dict[str, Task] = {}
         self._state_dir = ".stagehand/runs"
         self._logger: Optional[Logger] = None
+        self._max_concurrency: Optional[int] = None
 
     def agent(
         self,
@@ -91,6 +92,17 @@ class WorkflowBuilder:
         self._logger = logger
         return self
 
+    def concurrency(self, max_concurrency: int) -> "WorkflowBuilder":
+        """Cap the number of tasks that run simultaneously.
+
+        ``None`` (the default) means unlimited. ``1`` forces strictly sequential
+        execution regardless of the DAG structure.
+        """
+        if max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency!r}")
+        self._max_concurrency = max_concurrency
+        return self
+
     def build(self) -> Workflow:
         """Returns the Workflow without running it."""
         self._validate()
@@ -104,7 +116,11 @@ class WorkflowBuilder:
     async def run(self, inputs: Optional[dict[str, str]] = None) -> str:
         """Build and run the workflow. Returns the run_id."""
         workflow = self.build()
-        scheduler = Scheduler(run_state_directory=self._state_dir, logger=self._logger)
+        scheduler = Scheduler(
+            run_state_directory=self._state_dir,
+            logger=self._logger,
+            max_concurrency=self._max_concurrency,
+        )
         return await scheduler.run(workflow, inputs=inputs or {})
 
     def _validate(self) -> None:
