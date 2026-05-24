@@ -166,3 +166,37 @@ async def test_failing_task_raises():
             .state_dir(tempfile.mkdtemp())
             .run()
         )
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limits_parallel_tasks():
+    import asyncio
+    peak = 0
+    current = 0
+
+    class TrackingExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            nonlocal peak, current
+            current += 1
+            peak = max(peak, current)
+            await asyncio.sleep(0)
+            current -= 1
+            return ExecutionResult(output="ok", files=[])
+
+    ex = TrackingExecutor()
+    await (
+        WorkflowBuilder("test")
+        .agent("a", ex)
+        .task("t1", agent="a", prompt="p1")
+        .task("t2", agent="a", prompt="p2")
+        .task("t3", agent="a", prompt="p3")
+        .concurrency(2)
+        .state_dir(tempfile.mkdtemp())
+        .run()
+    )
+    assert peak <= 2
+
+
+def test_concurrency_invalid_raises():
+    with pytest.raises(ValueError, match="max_concurrency"):
+        WorkflowBuilder("test").concurrency(0)
