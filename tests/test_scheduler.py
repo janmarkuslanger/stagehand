@@ -611,3 +611,41 @@ async def test_fn_task_timeout_fires():
     with pytest.raises(TimeoutError):
         await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
 
+
+@pytest.mark.asyncio
+async def test_fn_task_async_retry():
+    calls = []
+
+    async def flaky(ctx):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("transient")
+        return "ok"
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"fetch": Task(fn=flaky, retry=RetryPolicy(max_attempts=3))},
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_fn_task_timeout_per_attempt_retry_succeeds():
+    attempts = []
+
+    async def slow_then_fast(ctx):
+        attempts.append(1)
+        if len(attempts) == 1:
+            await asyncio.sleep(10)  # first attempt: too slow
+        return "ok"
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"t1": Task(fn=slow_then_fast, timeout=0.05, retry=RetryPolicy(max_attempts=2))},
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert len(attempts) == 2
+

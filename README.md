@@ -49,7 +49,7 @@ asyncio.run(main())
 ```python
 WorkflowBuilder(name, version="1")
   .agent(agent_id, executor, *, model, system_prompt, role, tools)
-  .task(task_id, *, agent, prompt, after, outputs, secrets, retry, timeout)
+  .task(task_id, *, agent, prompt, fn, after, outputs, secrets, retry, timeout)
   .state_dir(directory)   # where run state is persisted (default: .stagehand/runs)
   .run(inputs={})         # returns run_id
 ```
@@ -118,7 +118,7 @@ The callable receives a `RunContext` (access to `inputs` and previous task resul
 | `outputs` | `StaticOutputs`, `DynamicOutputs`, or `PatternOutputs` |
 | `secrets` | List of secret names to resolve at runtime |
 | `retry` | `RetryPolicy` — how many times to retry on failure |
-| `timeout` | `None` | Seconds before a single attempt is cancelled. `None` = no limit. Sync `fn` tasks cannot be interrupted. |
+| `timeout` | Seconds before a single attempt is cancelled. `None` = no limit. Sync `fn` tasks cannot be interrupted. |
 
 Tasks with no `after` (or whose dependencies are all complete) start immediately. Multiple ready tasks run in parallel.
 
