@@ -4,7 +4,7 @@ import asyncio
 import inspect
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from stagehand.core.context import RunContext
 from stagehand.core.graph import build_graph
@@ -13,6 +13,14 @@ from stagehand.core.template import resolve
 from stagehand.core.workflow import RetryPolicy, TaskResult, Workflow
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
 from stagehand.ports.logger import Logger
+
+
+@dataclass
+class _RetryContext:
+    task_id: str
+    policy: RetryPolicy
+    logger: Logger
+    timeout: Optional[float]
 
 
 class TaskPhase(Enum):
@@ -181,9 +189,11 @@ class Scheduler:
         self._logger.info(f"task '{task_id}' starting")
         task = workflow.tasks[task_id]
 
+        ctx = _RetryContext(task_id=task_id, policy=task.retry, logger=self._logger, timeout=task.timeout)
+
         if task.fn is not None:
             try:
-                result = await _call_fn_with_retry(task.fn, run_context, task.retry, task_id, self._logger)
+                result = await _retry(lambda: _invoke_fn(task.fn, run_context), ctx)  # type: ignore[arg-type]
             except Exception as error:
                 self._logger.error(f"task '{task_id}' failed: {error}")
                 await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
@@ -209,7 +219,7 @@ class Scheduler:
                 run_id=run_context.run_id,
                 task_id=task_id,
             )
-            exec_result = await _execute_with_retry(executor, request, task.retry, self._logger)
+            exec_result = await _retry(lambda: executor.execute(request), ctx)
         except Exception as error:
             self._logger.error(f"task '{task_id}' failed: {error}")
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
@@ -221,59 +231,43 @@ class Scheduler:
         )
 
 
-async def _execute_with_retry(
-    executor: AgentExecutor,
-    request: ExecutionRequest,
-    policy: RetryPolicy,
-    logger: Logger,
-) -> ExecutionResult:
-    last_error: Optional[Exception] = None
+async def _invoke_fn(fn: Callable, run_context: RunContext) -> TaskResult:
+    raw = fn(run_context)
+    if inspect.isawaitable(raw):
+        raw = await raw
+    if isinstance(raw, TaskResult):
+        return raw
+    return TaskResult(output=str(raw))
 
-    for attempt in range(policy.max_attempts):
+
+async def _retry(
+    coro_factory: Callable[[], Awaitable[Any]],
+    ctx: _RetryContext,
+) -> Any:
+    last_error: Optional[Exception] = None
+    for attempt in range(ctx.policy.max_attempts):
         try:
-            return await executor.execute(request)
+            coro = coro_factory()
+            result = await (
+                asyncio.wait_for(coro, timeout=ctx.timeout)
+                if ctx.timeout is not None else coro
+            )
+            return result
+        except TimeoutError as error:
+            last_error = (
+                TimeoutError(f"task '{ctx.task_id}' timed out after {ctx.timeout}s")
+                if ctx.timeout is not None else error
+            )
         except Exception as error:
             last_error = error
-            has_remaining_attempts = attempt < policy.max_attempts - 1
-            if has_remaining_attempts:
-                delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
-                logger.warning(
-                    f"task '{request.task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {error}{delay_suffix}"
-                )
-                if policy.delay > 0:
-                    await asyncio.sleep(policy.delay)
-
-    raise last_error  # type: ignore[misc]
-
-
-async def _call_fn_with_retry(
-    fn: Callable,
-    run_context: RunContext,
-    policy: RetryPolicy,
-    task_id: str,
-    logger: Logger,
-) -> TaskResult:
-    last_error: Optional[Exception] = None
-
-    for attempt in range(policy.max_attempts):
-        try:
-            raw = fn(run_context)
-            if inspect.isawaitable(raw):
-                raw = await raw
-            if isinstance(raw, TaskResult):
-                return raw
-            return TaskResult(output=str(raw))
-        except Exception as error:
-            last_error = error
-            has_remaining_attempts = attempt < policy.max_attempts - 1
-            if has_remaining_attempts:
-                delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
-                logger.warning(
-                    f"task '{task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {error}{delay_suffix}"
-                )
-                if policy.delay > 0:
-                    await asyncio.sleep(policy.delay)
-
+        has_remaining_attempts = attempt < ctx.policy.max_attempts - 1
+        if has_remaining_attempts:
+            delay_suffix = f", retrying in {ctx.policy.delay}s" if ctx.policy.delay > 0 else ", retrying"
+            ctx.logger.warning(
+                f"task '{ctx.task_id}' attempt {attempt + 1}/{ctx.policy.max_attempts} failed: {last_error}{delay_suffix}"
+            )
+            if ctx.policy.delay > 0:
+                await asyncio.sleep(ctx.policy.delay)
     raise last_error  # type: ignore[misc]
 
 

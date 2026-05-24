@@ -66,6 +66,11 @@ class Task:
     secrets: list[str] = field(default_factory=list)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     fn: Optional[Callable] = None
+    timeout: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.timeout is not None and self.timeout <= 0:
+            raise ValueError(f"Task.timeout must be > 0, got {self.timeout!r}")
 
 
 @dataclass

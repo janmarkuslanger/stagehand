@@ -62,6 +62,7 @@ class WorkflowBuilder:
         outputs: Optional[OutputSpec] = None,
         secrets: Optional[list[str]] = None,
         retry: Optional[RetryPolicy] = None,
+        timeout: Optional[float] = None,
     ) -> "WorkflowBuilder":
         """Add a task node to the DAG.
 
@@ -76,6 +77,7 @@ class WorkflowBuilder:
             outputs=outputs or DynamicOutputs(),
             secrets=secrets or [],
             retry=retry or RetryPolicy(),
+            timeout=timeout,
         )
         return self
 
