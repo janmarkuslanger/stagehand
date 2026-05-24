@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 from typing import Optional
 from unittest.mock import AsyncMock, patch
@@ -423,6 +424,77 @@ async def test_fn_task_failure_cancels_downstream():
     with pytest.raises(RuntimeError, match="api down"):
         await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
     assert "analyze" not in executor.order
+
+
+# ---------------------------------------------------------------------------
+# max_concurrency tests
+# ---------------------------------------------------------------------------
+
+def test_max_concurrency_invalid_raises():
+    with pytest.raises(ValueError, match="max_concurrency"):
+        Scheduler(max_concurrency=0)
+    with pytest.raises(ValueError, match="max_concurrency"):
+        Scheduler(max_concurrency=-1)
+
+
+@pytest.mark.asyncio
+async def test_max_concurrency_limits_simultaneous_tasks():
+    """No more than max_concurrency tasks should run at the same time."""
+    peak_concurrency = 0
+    current_concurrency = 0
+
+    class TrackingExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            nonlocal peak_concurrency, current_concurrency
+            current_concurrency += 1
+            peak_concurrency = max(peak_concurrency, current_concurrency)
+            await asyncio.sleep(0)  # yield so other tasks can start
+            current_concurrency -= 1
+            return ExecutionResult(output="ok", files=[])
+
+    executor = TrackingExecutor()
+    wf = _make_workflow({
+        "t1": Task(agent_id="a", prompt="p1"),
+        "t2": Task(agent_id="a", prompt="p2"),
+        "t3": Task(agent_id="a", prompt="p3"),
+        "t4": Task(agent_id="a", prompt="p4"),
+    }, executor)
+
+    scheduler = Scheduler(run_state_directory=tempfile.mkdtemp(), max_concurrency=2)
+    await scheduler.run(wf)
+
+    assert peak_concurrency <= 2
+
+
+@pytest.mark.asyncio
+async def test_max_concurrency_all_tasks_complete():
+    executor = RecordingExecutor()
+    wf = _make_workflow({
+        "t1": Task(agent_id="a", prompt="p1"),
+        "t2": Task(agent_id="a", prompt="p2"),
+        "t3": Task(agent_id="a", prompt="p3"),
+    }, executor)
+
+    scheduler = Scheduler(run_state_directory=tempfile.mkdtemp(), max_concurrency=1)
+    run_id = await scheduler.run(wf)
+
+    assert set(executor.order) == {"t1", "t2", "t3"}
+    assert run_id.startswith("sh-")
+
+
+@pytest.mark.asyncio
+async def test_max_concurrency_none_is_unlimited():
+    executor = RecordingExecutor()
+    wf = _make_workflow({
+        "t1": Task(agent_id="a", prompt="p1"),
+        "t2": Task(agent_id="a", prompt="p2"),
+        "t3": Task(agent_id="a", prompt="p3"),
+    }, executor)
+
+    scheduler = Scheduler(run_state_directory=tempfile.mkdtemp(), max_concurrency=None)
+    await scheduler.run(wf)
+
+    assert set(executor.order) == {"t1", "t2", "t3"}
 
 
 @pytest.mark.asyncio

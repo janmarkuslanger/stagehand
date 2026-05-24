@@ -188,6 +188,14 @@ from stagehand import Scheduler, StdlibLogger
 scheduler = Scheduler(run_state_directory=".stagehand/runs", logger=StdlibLogger())
 ```
 
+To cap the number of tasks running at the same time, pass `max_concurrency`:
+
+```python
+scheduler = Scheduler(run_state_directory=".stagehand/runs", max_concurrency=4)
+```
+
+`None` (the default) means unlimited — all ready tasks start immediately. Setting it to `1` makes the scheduler execute one task at a time, regardless of the DAG structure.
+
 To write a custom logger — for example to route events to a structured sink — implement the `Logger` port:
 
 ```python

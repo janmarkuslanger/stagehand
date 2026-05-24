@@ -49,10 +49,14 @@ class Scheduler:
         default_executor: Optional[AgentExecutor] = None,
         run_state_directory: str = ".stagehand/runs",
         logger: Optional[Logger] = None,
+        max_concurrency: Optional[int] = None,
     ) -> None:
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency!r}")
         self.default_executor = default_executor
         self.run_state_directory = run_state_directory
         self._logger: Logger = logger or _NullLogger()
+        self.max_concurrency = max_concurrency
 
     async def run(
         self,
@@ -113,6 +117,7 @@ class Scheduler:
         outcome_queue: asyncio.Queue[_TaskOutcome] = asyncio.Queue()
         running_count = 0
         running_tasks: set[asyncio.Task[None]] = set()
+        pending: list[str] = []
 
         def launch(task_id: str) -> None:
             nonlocal running_count
@@ -122,9 +127,15 @@ class Scheduler:
             running_tasks.add(asyncio_task)
             asyncio_task.add_done_callback(running_tasks.discard)
 
+        def try_launch(task_id: str) -> None:
+            if self.max_concurrency is None or running_count < self.max_concurrency:
+                launch(task_id)
+            else:
+                pending.append(task_id)
+
         for task_id in workflow.tasks:
             if in_degree[task_id] == 0 and phases[task_id] == TaskPhase.WAITING:
-                launch(task_id)
+                try_launch(task_id)
 
         first_error: Optional[Exception] = None
 
@@ -146,7 +157,10 @@ class Scheduler:
                         continue
                     in_degree[dependent_id] -= 1
                     if in_degree[dependent_id] == 0:
-                        launch(dependent_id)
+                        try_launch(dependent_id)
+
+            while pending and (self.max_concurrency is None or running_count < self.max_concurrency):
+                launch(pending.pop(0))
 
         if first_error is not None:
             self._logger.error(
