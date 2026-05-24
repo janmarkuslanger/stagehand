@@ -183,7 +183,7 @@ class Scheduler:
 
         if task.fn is not None:
             try:
-                result = await _call_fn_with_retry(task.fn, run_context, task.retry, task_id, self._logger)
+                result = await _call_fn_with_retry(task.fn, run_context, task.retry, task_id, self._logger, task.timeout)
             except Exception as error:
                 self._logger.error(f"task '{task_id}' failed: {error}")
                 await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
@@ -209,7 +209,7 @@ class Scheduler:
                 run_id=run_context.run_id,
                 task_id=task_id,
             )
-            exec_result = await _execute_with_retry(executor, request, task.retry, self._logger)
+            exec_result = await _execute_with_retry(executor, request, task.retry, self._logger, task.timeout)
         except Exception as error:
             self._logger.error(f"task '{task_id}' failed: {error}")
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
@@ -226,22 +226,27 @@ async def _execute_with_retry(
     request: ExecutionRequest,
     policy: RetryPolicy,
     logger: Logger,
+    timeout: Optional[float] = None,
 ) -> ExecutionResult:
     last_error: Optional[Exception] = None
 
     for attempt in range(policy.max_attempts):
         try:
-            return await executor.execute(request)
+            coro = executor.execute(request)
+            result = await (asyncio.wait_for(coro, timeout=timeout) if timeout is not None else coro)
+            return result
+        except TimeoutError:
+            last_error = TimeoutError(f"task '{request.task_id}' timed out after {timeout}s")
         except Exception as error:
             last_error = error
-            has_remaining_attempts = attempt < policy.max_attempts - 1
-            if has_remaining_attempts:
-                delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
-                logger.warning(
-                    f"task '{request.task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {error}{delay_suffix}"
-                )
-                if policy.delay > 0:
-                    await asyncio.sleep(policy.delay)
+        has_remaining_attempts = attempt < policy.max_attempts - 1
+        if has_remaining_attempts:
+            delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
+            logger.warning(
+                f"task '{request.task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {last_error}{delay_suffix}"
+            )
+            if policy.delay > 0:
+                await asyncio.sleep(policy.delay)
 
     raise last_error  # type: ignore[misc]
 
@@ -252,6 +257,7 @@ async def _call_fn_with_retry(
     policy: RetryPolicy,
     task_id: str,
     logger: Logger,
+    timeout: Optional[float] = None,
 ) -> TaskResult:
     last_error: Optional[Exception] = None
 
@@ -259,20 +265,22 @@ async def _call_fn_with_retry(
         try:
             raw = fn(run_context)
             if inspect.isawaitable(raw):
-                raw = await raw
+                raw = await (asyncio.wait_for(raw, timeout=timeout) if timeout is not None else raw)
             if isinstance(raw, TaskResult):
                 return raw
             return TaskResult(output=str(raw))
+        except TimeoutError:
+            last_error = TimeoutError(f"task '{task_id}' timed out after {timeout}s")
         except Exception as error:
             last_error = error
-            has_remaining_attempts = attempt < policy.max_attempts - 1
-            if has_remaining_attempts:
-                delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
-                logger.warning(
-                    f"task '{task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {error}{delay_suffix}"
-                )
-                if policy.delay > 0:
-                    await asyncio.sleep(policy.delay)
+        has_remaining_attempts = attempt < policy.max_attempts - 1
+        if has_remaining_attempts:
+            delay_suffix = f", retrying in {policy.delay}s" if policy.delay > 0 else ", retrying"
+            logger.warning(
+                f"task '{task_id}' attempt {attempt + 1}/{policy.max_attempts} failed: {last_error}{delay_suffix}"
+            )
+            if policy.delay > 0:
+                await asyncio.sleep(policy.delay)
 
     raise last_error  # type: ignore[misc]
 

@@ -515,3 +515,99 @@ async def test_fn_task_retry():
     await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
     assert len(calls) == 3
 
+
+# ---------------------------------------------------------------------------
+# timeout tests
+# ---------------------------------------------------------------------------
+
+def test_task_timeout_invalid_raises():
+    with pytest.raises(ValueError, match="timeout"):
+        Task(fn=lambda ctx: "ok", timeout=0)
+    with pytest.raises(ValueError, match="timeout"):
+        Task(fn=lambda ctx: "ok", timeout=-1.0)
+
+
+@pytest.mark.asyncio
+async def test_timeout_fires_task_fails():
+    class SlowExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            await asyncio.sleep(10)
+            return ExecutionResult(output="ok", files=[])
+
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="slow", timeout=0.05)},
+        SlowExecutor(),
+    )
+    with pytest.raises(TimeoutError):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
+
+@pytest.mark.asyncio
+async def test_timeout_fires_downstream_cancelled():
+    class SlowExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            await asyncio.sleep(10)
+            return ExecutionResult(output="ok", files=[])
+
+    executor = RecordingExecutor()
+    wf = Workflow(
+        name="test",
+        agents={
+            "slow": AgentConfig(executor=SlowExecutor(), tools=[]),
+            "a": AgentConfig(executor=executor, tools=[]),
+        },
+        tasks={
+            "t1": Task(agent_id="slow", prompt="slow", timeout=0.05),
+            "t2": Task(agent_id="a", prompt="downstream", depends_on=["t1"]),
+        },
+    )
+    with pytest.raises(TimeoutError):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert "t2" not in executor.order
+
+
+@pytest.mark.asyncio
+async def test_timeout_none_completes_normally():
+    executor = RecordingExecutor()
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="fast", timeout=None)},
+        executor,
+    )
+    run_id = await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert executor.order == ["t1"]
+    assert run_id.startswith("sh-")
+
+
+@pytest.mark.asyncio
+async def test_timeout_per_attempt_retry_succeeds():
+    attempts = []
+
+    class SlowThenFastExecutor(AgentExecutor):
+        async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+            attempts.append(1)
+            if len(attempts) == 1:
+                await asyncio.sleep(10)  # first attempt: too slow
+            return ExecutionResult(output="ok", files=[])
+
+    wf = _make_workflow(
+        {"t1": Task(agent_id="a", prompt="p", timeout=0.05, retry=RetryPolicy(max_attempts=2))},
+        SlowThenFastExecutor(),
+    )
+    await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_fn_task_timeout_fires():
+    async def slow(ctx):
+        await asyncio.sleep(10)
+        return "ok"
+
+    wf = Workflow(
+        name="test",
+        agents={},
+        tasks={"t1": Task(fn=slow, timeout=0.05)},
+    )
+    with pytest.raises(TimeoutError):
+        await Scheduler(run_state_directory=tempfile.mkdtemp()).run(wf)
+
