@@ -526,6 +526,13 @@ await scheduler.resume(run_id, workflow)
 
 ## Examples
 
+Runnable scripts live in [`examples/`](examples/):
+
+- [`ollama_test.py`](examples/ollama_test.py) — sequential and parallel pipelines.
+- [`full_pipeline.py`](examples/full_pipeline.py) — kitchen-sink demo combining a
+  deterministic `fn` task with structured `data`, fan-out (`over`), a conditional
+  task (`when`), structured-data templates, and an iterative loop (`loop_until`).
+
 ### Sequential
 
 ```python
