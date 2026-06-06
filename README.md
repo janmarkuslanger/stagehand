@@ -247,6 +247,10 @@ from stagehand import StaticOutputs, DynamicOutputs, PatternOutputs
 ## Executors
 
 An executor is the AI backend that drives a task. Stagehand ships two:
+`OllamaExecutor` and `ClaudeExecutor`. Both are built on the shared
+`BaseAgentExecutor` (see [Custom executor](#custom-executor)), which provides
+the agentic loop, the built-in storage tools and custom-tool dispatch — each
+backend only implements the parts specific to its API.
 
 ### `OllamaExecutor`
 
@@ -353,7 +357,7 @@ class MyStorage(ArtifactStorage):
 
 ### Custom executor
 
-Implement `AgentExecutor` to add any backend:
+For a non-agentic backend, implement the `AgentExecutor` port directly:
 
 ```python
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
@@ -363,6 +367,32 @@ class MyExecutor(AgentExecutor):
         output = call_my_model(request.prompt, request.system_prompt)
         return ExecutionResult(output=output)
 ```
+
+To add a new **tool-using** backend, extend `BaseAgentExecutor` instead. It
+implements the agent loop, the built-in `write_file` / `read_file` /
+`list_files` tools and custom-tool dispatch via a [template method](https://en.wikipedia.org/wiki/Template_method_pattern);
+you only fill in the backend-specific hooks:
+
+```python
+from stagehand.adapters.executor import BaseAgentExecutor
+from stagehand.adapters.executor.base import ParsedTurn, ToolInvocation
+
+class MyExecutor(BaseAgentExecutor):
+    _label = "my executor"
+
+    def _default_model(self): ...            # model id when none is requested
+    def _init_messages(self, request): ...   # build the initial transcript
+    def _serialize_tools(self, tools): ...    # ToolDefinition -> your SDK's format
+    async def _call_model(self, model, request, messages, tools): ...
+    def _parse_response(self, resp, request, step) -> ParsedTurn: ...
+    def _format_tool_result(self, call, content, is_error): ...
+    def _append_tool_results(self, messages, tool_results): ...
+    # optional: _parse_arguments(raw) if tool args arrive encoded (e.g. JSON)
+```
+
+The built-in tool schemas live in one place — `BUILTIN_TOOLS` in
+`stagehand/adapters/executor/base.py` — and each backend serialises them into
+its own format via `_serialize_tools`.
 
 ---
 
@@ -443,7 +473,7 @@ builder   →  core/ + ports/
 |---|---|
 | `stagehand/core/` | Domain types, DAG, scheduler, run state, template engine |
 | `stagehand/ports/` | ABCs: `AgentExecutor`, `ArtifactStorage`, `SecretProvider` |
-| `stagehand/adapters/executor/` | `ClaudeExecutor`, `OllamaExecutor` |
+| `stagehand/adapters/executor/` | `BaseAgentExecutor`, `ClaudeExecutor`, `OllamaExecutor` |
 | `stagehand/adapters/storage/` | `FilesystemStorage` |
 | `stagehand/adapters/secrets/` | `EnvSecretProvider` |
 | `stagehand/builder.py` | `WorkflowBuilder` — primary public API |
