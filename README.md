@@ -49,11 +49,18 @@ asyncio.run(main())
 ```python
 WorkflowBuilder(name, version="1")
   .agent(agent_id, executor, *, model, system_prompt, role, tools)
-  .task(task_id, *, agent, prompt, fn, after, outputs, secrets, retry, timeout)
+  .task(task_id, *, agent, prompt, fn, after, outputs, secrets, retry, timeout,
+        when, over, loop_until, max_iterations)
   .state_dir(directory)   # where run state is persisted (default: .stagehand/runs)
   .concurrency(n)         # max tasks running simultaneously (default: unlimited)
   .run(inputs={})         # returns run_id
 ```
+
+Beyond a static DAG, tasks support runtime dynamics: **conditionals**
+(`when`), **loops** (`loop_until` / `max_iterations`) and **fan-out / map**
+(`over`), plus a structured `data` channel between tasks. See
+[Structured data](#structured-data), [Conditional tasks](#conditional-tasks),
+[Loops](#loops) and [Fan-out / map](#fan-out--map).
 
 `.build()` returns a `Workflow` object without running it, useful if you want to pass it to a `Scheduler` directly.
 
