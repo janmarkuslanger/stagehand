@@ -2,41 +2,63 @@
 
 Stagehand orchestrates multi-agent AI workflows in pure Python. Each workflow is a directed acyclic graph (DAG) of tasks. Tasks with no dependencies run in parallel; tasks with dependencies wait until their upstream tasks complete.
 
+**New here?** Jump to [Get started](#get-started) for a copy-paste first run.
+**Looking for details?** [Concepts](#concepts) · [Executors](#executors) · [Resume](#resume) · [Examples](#examples) · [Architecture](#architecture)
+
+Concepts at a glance: [Builder](#builder) · [Agents](#agents) · [Tasks](#tasks) · [Retry](#retry) · [Structured data](#structured-data) · [Conditional tasks](#conditional-tasks) · [Loops](#loops) · [Fan-out / map](#fan-out--map) · [Logging](#logging) · [Template expressions](#template-expressions) · [Outputs](#outputs)
+
 ---
 
-## Installation
+## Get started
+
+**1. Install Stagehand** (Python 3.11+):
 
 ```bash
 pip install stagehand-ai
 ```
 
-Requires Python 3.11+.
+**2. Get a local model running.** Stagehand runs models locally through
+[Ollama](https://ollama.com) — no API key, nothing to sign up for:
 
----
+```bash
+# install Ollama from https://ollama.com, then:
+ollama pull qwen2.5     # download a model that's good at following instructions
+ollama serve            # start the local server (leave this running)
+```
 
-## Quickstart
+**3. Run your first workflow.** Save this as `haiku.py` and run `python haiku.py`:
 
 ```python
 import asyncio
-from stagehand import WorkflowBuilder
+from stagehand import WorkflowBuilder, load_state
 from stagehand.adapters.executor import OllamaExecutor
 
 async def main():
+    # Two tasks: "draft" writes a haiku, "refine" improves it.
+    # {{ tasks.draft }} injects the draft's output into the next prompt.
     run_id = await (
         WorkflowBuilder("haiku-pipeline")
         .agent("writer", OllamaExecutor(), model="qwen2.5",
-               system_prompt="You are a haiku writer.",
-               tools=["write_file"])
+               system_prompt="You are a haiku writer. Reply with only the haiku.")
         .task("draft",  agent="writer", prompt="Write a haiku about the ocean at dawn.")
         .task("refine", agent="writer",
-              prompt="Refine this haiku:\n\n{{ tasks.draft }}",
+              prompt="Refine this haiku to be more vivid:\n\n{{ tasks.draft }}",
               after=["draft"])
         .run()
     )
-    print(f"Done — run {run_id}")
+
+    # Read the finished result back from the saved run state.
+    final = load_state(run_id, ".stagehand/runs").tasks["refine"].output
+    print(final)
 
 asyncio.run(main())
 ```
+
+That's it — no files, no API keys, no storage to configure. The two tasks run
+in order (`refine` waits for `draft`), and you see the refined haiku printed.
+
+> **Want the agent to write files instead?** Give it the `write_file` tool and a
+> storage backend — see [Executors](#executors) and [Outputs](#outputs).
 
 ---
 
