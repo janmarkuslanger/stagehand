@@ -200,3 +200,21 @@ async def test_concurrency_limits_parallel_tasks():
 def test_concurrency_invalid_raises():
     with pytest.raises(ValueError, match="max_concurrency"):
         WorkflowBuilder("test").concurrency(0)
+
+
+def test_task_passes_runtime_dynamics_to_task():
+    when = lambda ctx: True
+    over = lambda ctx: []
+    loop_until = lambda ctx, r: True
+    wf = (
+        WorkflowBuilder("test")
+        .agent("a", StubExecutor())
+        .task("cond", agent="a", prompt="p", when=when)
+        .task("loop", agent="a", prompt="p", loop_until=loop_until, max_iterations=3)
+        .task("fan", agent="a", prompt="p", over=over)
+        .build()
+    )
+    assert wf.tasks["cond"].when is when
+    assert wf.tasks["loop"].loop_until is loop_until
+    assert wf.tasks["loop"].max_iterations == 3
+    assert wf.tasks["fan"].over is over

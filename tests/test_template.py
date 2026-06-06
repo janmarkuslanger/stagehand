@@ -65,3 +65,45 @@ def test_file_slug_special_chars():
     assert _file_slug("design-system.md") == "design_system_md"
     assert _file_slug("tokens.css") == "tokens_css"
     assert _file_slug("path/to/file.txt") == "file_txt"
+
+
+def test_resolve_task_data_scalar():
+    ctx = _ctx(results={"t": TaskResult(output="x", data=42)})
+    assert resolve("{{ tasks.t.data }}", ctx) == "42"
+
+
+def test_resolve_task_data_nested():
+    ctx = _ctx(results={"t": TaskResult(output="x", data={"user": {"name": "Ada"}})})
+    assert resolve("{{ tasks.t.data.user.name }}", ctx) == "Ada"
+
+
+def test_resolve_task_data_list_index():
+    ctx = _ctx(results={"t": TaskResult(output="x", data=["a", "b", "c"])})
+    assert resolve("{{ tasks.t.data.1 }}", ctx) == "b"
+
+
+def test_resolve_task_data_none_is_empty():
+    ctx = _ctx(results={"t": TaskResult(output="x")})
+    assert resolve("[{{ tasks.t.data }}]", ctx) == "[]"
+
+
+def test_resolve_extra_item():
+    ctx = _ctx()
+    assert resolve("item={{ item }}", ctx, extra={"item": "X"}) == "item=X"
+
+
+def test_resolve_extra_item_nested():
+    ctx = _ctx()
+    assert resolve("{{ item.lang }}", ctx, extra={"item": {"lang": "de"}}) == "de"
+
+
+def test_resolve_extra_loop():
+    ctx = _ctx()
+    out = resolve("i={{ loop.iteration }} p={{ loop.previous }}", ctx,
+                  extra={"loop": {"iteration": 2, "previous": "old"}})
+    assert out == "i=2 p=old"
+
+
+def test_resolve_input_structured():
+    ctx = _ctx(inputs={"cfg": {"depth": 3}})
+    assert resolve("{{ input.cfg.depth }}", ctx) == "3"
