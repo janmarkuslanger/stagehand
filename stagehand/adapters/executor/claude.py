@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any, Optional
 
 import anthropic
 
+from stagehand.adapters.executor.base import (
+    BaseAgentExecutor,
+    ParsedTurn,
+    ToolInvocation,
+)
 from stagehand.adapters.logger import NullLogger
-from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult, ToolDefinition
+from stagehand.ports.executor import ExecutionRequest, ToolDefinition
 from stagehand.ports.logger import Logger
 from stagehand.ports.storage import ArtifactStorage
 
-MAX_AGENT_STEPS = 20
 DEFAULT_MODEL = "claude-opus-4-5"
 
 
-class ClaudeExecutor(AgentExecutor):
+class ClaudeExecutor(BaseAgentExecutor):
     """Runs a task by calling the Anthropic Messages API.
 
     Extra tools can be passed at construction time, enabling extension
@@ -23,6 +26,8 @@ class ClaudeExecutor(AgentExecutor):
 
         executor = ClaudeExecutor(api_key="...", extra_tools=[MyTool])
     """
+
+    _label = "claude executor"
 
     def __init__(
         self,
@@ -33,83 +38,76 @@ class ClaudeExecutor(AgentExecutor):
         rate_limit_delay: float = 60.0,
         logger: Optional[Logger] = None,
     ) -> None:
+        super().__init__(storage=storage, extra_tools=extra_tools)
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
-        self.storage = storage
-        self.extra_tools: list[ToolDefinition] = extra_tools or []
         self.rate_limit_retries = rate_limit_retries
         self.rate_limit_delay = rate_limit_delay
         self._logger: Logger = logger or NullLogger()
 
-    async def execute(self, request: ExecutionRequest) -> ExecutionResult:
-        model = request.model or DEFAULT_MODEL
-        system_prompt = request.system_prompt or "You are a helpful AI assistant."
+    def _default_model(self) -> str:
+        return DEFAULT_MODEL
 
-        built_in_tools = _build_tools(request.tools)
-        custom_tool_params = [
+    def _init_messages(self, request: ExecutionRequest) -> list[Any]:
+        return [{"role": "user", "content": request.prompt}]
+
+    def _serialize_tools(self, tools: list[ToolDefinition]) -> list[anthropic.types.ToolParam]:
+        return [
             anthropic.types.ToolParam(
                 name=t.name,
                 description=t.description,
                 input_schema=t.input_schema,
             )
-            for t in self.extra_tools
-        ]
-        all_tools = built_in_tools + custom_tool_params
-
-        messages: list[anthropic.types.MessageParam] = [
-            {"role": "user", "content": request.prompt}
+            for t in tools
         ]
 
-        final_output = ""
-        written_files: list[str] = []
-        last_stop_reason: Optional[str] = None
+    async def _call_model(
+        self,
+        model: str,
+        request: ExecutionRequest,
+        messages: list[Any],
+        tools: list[anthropic.types.ToolParam],
+    ) -> anthropic.types.Message:
+        system_prompt = request.system_prompt or "You are a helpful AI assistant."
+        return await self._create_with_retry(model, system_prompt, messages, tools)
 
-        for step in range(MAX_AGENT_STEPS):
-            resp = await self._create_with_retry(model, system_prompt, messages, all_tools)
+    def _parse_response(
+        self, resp: anthropic.types.Message, request: ExecutionRequest, step: int
+    ) -> ParsedTurn:
+        text: Optional[str] = None
+        tool_calls: list[ToolInvocation] = []
+        for block in resp.content:
+            if block.type == "text":
+                text = block.text
+            elif block.type == "tool_use":
+                tool_calls.append(
+                    ToolInvocation(id=block.id, name=block.name, raw_arguments=block.input)
+                )
 
-            last_stop_reason = resp.stop_reason
+        is_complete = resp.stop_reason != "tool_use"
+        assistant_message = (
+            None if is_complete else {"role": "assistant", "content": resp.content}
+        )
+        return ParsedTurn(
+            text=text,
+            tool_calls=tool_calls,
+            is_complete=is_complete,
+            assistant_message=assistant_message,
+        )
 
-            for block in resp.content:
-                if block.type == "text":
-                    final_output = block.text
+    def _format_tool_result(
+        self, call: ToolInvocation, content: str, is_error: bool
+    ) -> anthropic.types.ToolResultBlockParam:
+        result: anthropic.types.ToolResultBlockParam = {
+            "type": "tool_result",
+            "tool_use_id": call.id,
+            "content": content,
+        }
+        if is_error:
+            result["is_error"] = True
+        return result
 
-            if resp.stop_reason != "tool_use":
-                break
-
-            messages.append({"role": "assistant", "content": resp.content})
-
-            tool_results: list[anthropic.types.ToolResultBlockParam] = []
-            for block in resp.content:
-                if block.type != "tool_use":
-                    continue
-                try:
-                    result_content = await self._dispatch_tool(
-                        request.task_id, block, written_files
-                    )
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result_content,
-                        }
-                    )
-                except Exception as error:
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": str(error),
-                            "is_error": True,
-                        }
-                    )
-
-            messages.append({"role": "user", "content": tool_results})
-
-        if last_stop_reason == "tool_use":
-            raise RuntimeError(
-                f"claude executor: task {request.task_id}: agent did not complete within {MAX_AGENT_STEPS} steps"
-            )
-
-        return ExecutionResult(output=final_output, files=written_files)
+    def _append_tool_results(self, messages: list[Any], tool_results: list[Any]) -> None:
+        messages.append({"role": "user", "content": tool_results})
 
     async def _create_with_retry(
         self,
@@ -141,102 +139,3 @@ class ClaudeExecutor(AgentExecutor):
                     f"Rate limit (429) on attempt {attempt}/{total} — sleeping {self.rate_limit_delay}s"
                 )
                 await asyncio.sleep(self.rate_limit_delay)
-
-    async def _dispatch_tool(
-        self,
-        task_id: str,
-        tool_use: anthropic.types.ToolUseBlock,
-        written_files: list[str],
-    ) -> str:
-        name = tool_use.name
-        raw_input: dict[str, Any] = tool_use.input  # type: ignore[assignment]
-
-        if name == "write_file":
-            return await self._execute_write_file(task_id, raw_input, written_files)
-        if name == "read_file":
-            return await self._execute_read_file(task_id, raw_input)
-        if name == "list_files":
-            return await self._execute_list_files(task_id, raw_input)
-
-        for custom_tool in self.extra_tools:
-            if custom_tool.name == name:
-                result = custom_tool.handler(raw_input)
-                if hasattr(result, "__await__"):
-                    result = await result
-                return str(result)
-
-        raise ValueError(f"unknown tool {name!r}")
-
-    async def _execute_write_file(
-        self,
-        task_id: str,
-        raw_input: dict[str, Any],
-        written_files: list[str],
-    ) -> str:
-        path = raw_input.get("path", "")
-        content = raw_input.get("content", "")
-        if not path:
-            raise ValueError("write_file: path is required")
-        if self.storage is None:
-            raise RuntimeError("write_file: no storage configured")
-        storage_path = f"{task_id}/{path}"
-        await self.storage.write(storage_path, content.encode())
-        written_files.append(storage_path)
-        return "ok"
-
-    async def _execute_read_file(self, task_id: str, raw_input: dict[str, Any]) -> str:
-        path = raw_input.get("path", "")
-        if not path:
-            raise ValueError("read_file: path is required")
-        if self.storage is None:
-            raise RuntimeError("read_file: no storage configured")
-        data = await self.storage.read(f"{task_id}/{path}")
-        return data.decode()
-
-    async def _execute_list_files(self, task_id: str, raw_input: dict[str, Any]) -> str:
-        pattern = raw_input.get("pattern", "")
-        full_pattern = f"{task_id}/{pattern}" if pattern else f"{task_id}/*"
-        if self.storage is None:
-            raise RuntimeError("list_files: no storage configured")
-        files = await self.storage.list(full_pattern)
-        return "\n".join(files)
-
-
-def _build_tools(tool_names: list[str]) -> list[anthropic.types.ToolParam]:
-    available: dict[str, anthropic.types.ToolParam] = {
-        "write_file": anthropic.types.ToolParam(
-            name="write_file",
-            description="Write text content to a file. Creates the file if it does not exist.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Relative file path"},
-                    "content": {"type": "string", "description": "Text content to write"},
-                },
-                "required": ["path", "content"],
-            },
-        ),
-        "read_file": anthropic.types.ToolParam(
-            name="read_file",
-            description="Read the text content of a file.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Relative file path"},
-                },
-                "required": ["path"],
-            },
-        ),
-        "list_files": anthropic.types.ToolParam(
-            name="list_files",
-            description="List files matching a glob pattern.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Glob pattern, e.g. *.md"},
-                },
-                "required": ["pattern"],
-            },
-        ),
-    }
-    return [available[name] for name in tool_names if name in available]

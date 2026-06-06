@@ -1,5 +1,6 @@
 """Stagehand — asyncio DAG workflow engine for AI agents."""
 
+from stagehand.adapters.executor.base import BaseAgentExecutor
 from stagehand.adapters.executor.claude import ClaudeExecutor
 from stagehand.adapters.executor.ollama import OllamaExecutor
 from stagehand.adapters.logger import NullLogger, StdlibLogger
@@ -54,6 +55,7 @@ __all__ = [
     "Logger",
     "SecretProvider",
     # Adapters
+    "BaseAgentExecutor",
     "ClaudeExecutor",
     "OllamaExecutor",
     "StdlibLogger",
