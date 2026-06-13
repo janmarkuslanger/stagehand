@@ -4,6 +4,7 @@ from typing import Any, Callable, Optional
 
 from stagehand.core.workflow import AgentConfig, DynamicOutputs, OutputSpec, RetryPolicy, Task, Workflow
 from stagehand.core.scheduler import Scheduler
+from stagehand.ports.cache import ResultCache
 from stagehand.ports.executor import AgentExecutor
 from stagehand.ports.logger import Logger
 
@@ -31,6 +32,7 @@ class WorkflowBuilder:
         self._state_dir = ".stagehand/runs"
         self._logger: Optional[Logger] = None
         self._max_concurrency: Optional[int] = None
+        self._cache: Optional[ResultCache] = None
 
     def agent(
         self,
@@ -118,6 +120,15 @@ class WorkflowBuilder:
         self._max_concurrency = max_concurrency
         return self
 
+    def cache(self, cache: ResultCache) -> "WorkflowBuilder":
+        """Attach a result cache so identical agent work is reused across runs.
+
+        Only agent tasks are cached; deterministic ``fn`` tasks are never routed
+        through the cache. The default (no cache) recomputes every task.
+        """
+        self._cache = cache
+        return self
+
     def build(self) -> Workflow:
         """Returns the Workflow without running it."""
         self._validate()
@@ -135,6 +146,7 @@ class WorkflowBuilder:
             run_state_directory=self._state_dir,
             logger=self._logger,
             max_concurrency=self._max_concurrency,
+            cache=self._cache,
         )
         return await scheduler.run(workflow, inputs=inputs or {})
 

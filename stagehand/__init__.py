@@ -1,5 +1,7 @@
 """Stagehand — asyncio DAG workflow engine for AI agents."""
 
+from stagehand.adapters.cache.filesystem import FilesystemCache
+from stagehand.adapters.cache.memory import InMemoryCache
 from stagehand.adapters.executor.base import BaseAgentExecutor
 from stagehand.adapters.executor.claude import ClaudeExecutor
 from stagehand.adapters.executor.ollama import OllamaExecutor
@@ -21,6 +23,7 @@ from stagehand.core.workflow import (
     TaskResult,
     Workflow,
 )
+from stagehand.ports.cache import ResultCache, cache_key
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult, ToolDefinition
 from stagehand.ports.logger import Logger
 from stagehand.ports.secrets import SecretProvider
@@ -54,6 +57,8 @@ __all__ = [
     "ArtifactStorage",
     "Logger",
     "SecretProvider",
+    "ResultCache",
+    "cache_key",
     # Adapters
     "BaseAgentExecutor",
     "ClaudeExecutor",
@@ -63,4 +68,6 @@ __all__ = [
     "FilesystemStorage",
     "EnvSecretProvider",
     "ToolDefinition",
+    "InMemoryCache",
+    "FilesystemCache",
 ]
