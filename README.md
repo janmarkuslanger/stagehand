@@ -365,6 +365,16 @@ Stagehand ships two caches:
 | `InMemoryCache` | Process-local dict | Tests; dedup within one run |
 | `FilesystemCache` | One JSON file per key (default `.stagehand/cache`) | Survives restarts — the dev loop |
 
+Both accept an optional `ttl` (seconds): entries older than `ttl` are treated as
+a miss, so the backend is queried again. Expiry is lazy — checked on read, never
+evicted in the background — and `FilesystemCache` deletes the stale file when it
+sees it. The default `ttl=None` means entries never expire. This is useful when a
+persistent cache should not reuse results indefinitely:
+
+```python
+FilesystemCache(ttl=3600)   # cached results are reused for at most an hour
+```
+
 The cache key is a SHA-256 of the request's `model`, `system_prompt`, sorted
 `tools` and resolved `prompt`. `run_id` and `task_id` are excluded, so the key
 is stable across runs. Because the `prompt` is the already-resolved string, the
@@ -377,7 +387,9 @@ cache self-invalidates along the DAG.
 > used for fetches and side effects) always run. On a cache hit the stored
 > `output` and `files` are reused, but tools with external side effects are
 > **not** invoked again. Like persisted run state, `FilesystemCache` keeps
-> `output` and `files`, not the in-memory `data` value.
+> `output` and `files`, not the in-memory `data` value. With a `ttl` set,
+> caching becomes time-dependent — two runs with identical input can differ
+> depending on whether the entry has expired.
 
 To plug in your own backend (Redis, S3, …), implement the `ResultCache` port:
 

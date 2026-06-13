@@ -65,6 +65,33 @@ async def test_in_memory_get_miss_then_hit():
     assert hit is not None and hit.output == "hi"
 
 
+@pytest.mark.asyncio
+async def test_in_memory_ttl_expires(monkeypatch):
+    import stagehand.adapters.cache.memory as mem
+
+    now = [1000.0]
+    monkeypatch.setattr(mem.time, "time", lambda: now[0])
+    cache = InMemoryCache(ttl=10)
+    await cache.set("k", ExecutionResult(output="hi"))
+
+    now[0] = 1005.0  # within ttl
+    assert (await cache.get("k")).output == "hi"
+    now[0] = 1011.0  # past ttl
+    assert await cache.get("k") is None
+
+
+@pytest.mark.asyncio
+async def test_in_memory_no_ttl_never_expires(monkeypatch):
+    import stagehand.adapters.cache.memory as mem
+
+    now = [1000.0]
+    monkeypatch.setattr(mem.time, "time", lambda: now[0])
+    cache = InMemoryCache()  # ttl=None
+    await cache.set("k", ExecutionResult(output="hi"))
+    now[0] = 1_000_000.0
+    assert (await cache.get("k")).output == "hi"
+
+
 # --- Scheduler integration --------------------------------------------------
 
 
@@ -122,6 +149,23 @@ async def test_filesystem_cache_roundtrip():
     assert hit is not None
     assert hit.output == "persisted"
     assert hit.files == ["a.md"]
+
+
+@pytest.mark.asyncio
+async def test_filesystem_cache_ttl_expires(monkeypatch):
+    import stagehand.adapters.cache.filesystem as fsc
+
+    now = [1000.0]
+    monkeypatch.setattr(fsc.time, "time", lambda: now[0])
+    cache = FilesystemCache(root=tempfile.mkdtemp(), ttl=10)
+    await cache.set("k", ExecutionResult(output="hi"))
+
+    now[0] = 1005.0
+    assert (await cache.get("k")).output == "hi"
+    now[0] = 1011.0
+    assert await cache.get("k") is None
+    # Stale file was removed on the expired read.
+    assert await cache.get("k") is None
 
 
 @pytest.mark.asyncio

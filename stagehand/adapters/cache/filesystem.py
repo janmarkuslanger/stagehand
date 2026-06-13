@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Optional
 
 from stagehand.ports.cache import ResultCache
@@ -19,20 +20,39 @@ class FilesystemCache(ResultCache):
     Only ``output`` and ``files`` are persisted. The structured ``data`` value is
     in-memory only — consistent with persisted run state — so a result restored
     from disk has ``data=None``.
+
+    Parameters
+    ----------
+    root:
+        Directory under which cache files are written.
+    ttl:
+        If set, entries older than ``ttl`` seconds are treated as a miss and the
+        stale file is removed (lazy expiry — checked on read). ``None`` (the
+        default) means entries never expire.
     """
 
-    def __init__(self, root: str = ".stagehand/cache") -> None:
+    def __init__(self, root: str = ".stagehand/cache", ttl: Optional[float] = None) -> None:
         self.root = root
+        self._ttl = ttl
 
     def _path(self, key: str) -> str:
         return os.path.join(self.root, f"{key}.json")
 
     async def get(self, key: str) -> Optional[ExecutionResult]:
+        path = self._path(key)
         try:
-            with open(self._path(key), "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return None
+        if self._ttl is not None:
+            stored_at = payload.get("stored_at", 0.0)
+            if time.time() - stored_at > self._ttl:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return None
         return ExecutionResult(
             output=payload.get("output", ""),
             files=payload.get("files", []),
@@ -40,6 +60,10 @@ class FilesystemCache(ResultCache):
 
     async def set(self, key: str, result: ExecutionResult) -> None:
         os.makedirs(self.root, exist_ok=True)
-        payload = {"output": result.output, "files": result.files}
+        payload = {
+            "output": result.output,
+            "files": result.files,
+            "stored_at": time.time(),
+        }
         with open(self._path(key), "w", encoding="utf-8") as f:
             json.dump(payload, f)
