@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from stagehand.core.workflow import AgentConfig, DynamicOutputs, OutputSpec, RetryPolicy, Task, Workflow
 from stagehand.core.scheduler import Scheduler
@@ -64,11 +64,22 @@ class WorkflowBuilder:
         secrets: Optional[list[str]] = None,
         retry: Optional[RetryPolicy] = None,
         timeout: Optional[float] = None,
+        when: Optional[Callable] = None,
+        over: Optional[Callable] = None,
+        loop_until: Optional[Callable] = None,
+        max_iterations: int = 1,
     ) -> "WorkflowBuilder":
         """Add a task node to the DAG.
 
         Pass either ``agent`` + ``prompt`` for an AI-agent task, or ``fn`` for
         a deterministic task that runs a plain Python callable.
+
+        Runtime dynamics (all predicates may be sync or async):
+
+        - ``when(ctx) -> bool`` — skip the task when falsy.
+        - ``loop_until(ctx, result) -> bool`` — re-run the body until truthy or
+          ``max_iterations`` is reached.
+        - ``over(ctx) -> list`` — fan the task out into one child per item.
         """
         self._tasks[task_id] = Task(
             agent_id=agent or "",
@@ -79,6 +90,10 @@ class WorkflowBuilder:
             secrets=secrets or [],
             retry=retry or RetryPolicy(),
             timeout=timeout,
+            when=when,
+            over=over,
+            loop_until=loop_until,
+            max_iterations=max_iterations,
         )
         return self
 
@@ -113,7 +128,7 @@ class WorkflowBuilder:
             tasks=dict(self._tasks),
         )
 
-    async def run(self, inputs: Optional[dict[str, str]] = None) -> str:
+    async def run(self, inputs: Optional[dict[str, Any]] = None) -> str:
         """Build and run the workflow. Returns the run_id."""
         workflow = self.build()
         scheduler = Scheduler(

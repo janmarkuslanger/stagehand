@@ -2,41 +2,63 @@
 
 Stagehand orchestrates multi-agent AI workflows in pure Python. Each workflow is a directed acyclic graph (DAG) of tasks. Tasks with no dependencies run in parallel; tasks with dependencies wait until their upstream tasks complete.
 
+**New here?** Jump to [Get started](#get-started) for a copy-paste first run.
+**Looking for details?** [Concepts](#concepts) · [Executors](#executors) · [Resume](#resume) · [Examples](#examples) · [Architecture](#architecture)
+
+Concepts at a glance: [Builder](#builder) · [Agents](#agents) · [Tasks](#tasks) · [Retry](#retry) · [Structured data](#structured-data) · [Conditional tasks](#conditional-tasks) · [Loops](#loops) · [Fan-out / map](#fan-out--map) · [Logging](#logging) · [Template expressions](#template-expressions) · [Outputs](#outputs)
+
 ---
 
-## Installation
+## Get started
+
+**1. Install Stagehand** (Python 3.11+):
 
 ```bash
 pip install stagehand-ai
 ```
 
-Requires Python 3.11+.
+**2. Get a local model running.** Stagehand runs models locally through
+[Ollama](https://ollama.com) — no API key, nothing to sign up for:
 
----
+```bash
+# install Ollama from https://ollama.com, then:
+ollama pull qwen2.5     # download a model that's good at following instructions
+ollama serve            # start the local server (leave this running)
+```
 
-## Quickstart
+**3. Run your first workflow.** Save this as `haiku.py` and run `python haiku.py`:
 
 ```python
 import asyncio
-from stagehand import WorkflowBuilder
+from stagehand import WorkflowBuilder, load_state
 from stagehand.adapters.executor import OllamaExecutor
 
 async def main():
+    # Two tasks: "draft" writes a haiku, "refine" improves it.
+    # {{ tasks.draft }} injects the draft's output into the next prompt.
     run_id = await (
         WorkflowBuilder("haiku-pipeline")
         .agent("writer", OllamaExecutor(), model="qwen2.5",
-               system_prompt="You are a haiku writer.",
-               tools=["write_file"])
+               system_prompt="You are a haiku writer. Reply with only the haiku.")
         .task("draft",  agent="writer", prompt="Write a haiku about the ocean at dawn.")
         .task("refine", agent="writer",
-              prompt="Refine this haiku:\n\n{{ tasks.draft }}",
+              prompt="Refine this haiku to be more vivid:\n\n{{ tasks.draft }}",
               after=["draft"])
         .run()
     )
-    print(f"Done — run {run_id}")
+
+    # Read the finished result back from the saved run state.
+    final = load_state(run_id, ".stagehand/runs").tasks["refine"].output
+    print(final)
 
 asyncio.run(main())
 ```
+
+That's it — no files, no API keys, no storage to configure. The two tasks run
+in order (`refine` waits for `draft`), and you see the refined haiku printed.
+
+> **Want the agent to write files instead?** Give it the `write_file` tool and a
+> storage backend — see [Executors](#executors) and [Outputs](#outputs).
 
 ---
 
@@ -49,11 +71,18 @@ asyncio.run(main())
 ```python
 WorkflowBuilder(name, version="1")
   .agent(agent_id, executor, *, model, system_prompt, role, tools)
-  .task(task_id, *, agent, prompt, fn, after, outputs, secrets, retry, timeout)
+  .task(task_id, *, agent, prompt, fn, after, outputs, secrets, retry, timeout,
+        when, over, loop_until, max_iterations)
   .state_dir(directory)   # where run state is persisted (default: .stagehand/runs)
   .concurrency(n)         # max tasks running simultaneously (default: unlimited)
   .run(inputs={})         # returns run_id
 ```
+
+Beyond a static DAG, tasks support runtime dynamics: **conditionals**
+(`when`), **loops** (`loop_until` / `max_iterations`) and **fan-out / map**
+(`over`), plus a structured `data` channel between tasks. See
+[Structured data](#structured-data), [Conditional tasks](#conditional-tasks),
+[Loops](#loops) and [Fan-out / map](#fan-out--map).
 
 `.build()` returns a `Workflow` object without running it, useful if you want to pass it to a `Scheduler` directly.
 
@@ -120,6 +149,10 @@ The callable receives a `RunContext` (access to `inputs` and previous task resul
 | `secrets` | List of secret names to resolve at runtime |
 | `retry` | `RetryPolicy` — how many times to retry on failure |
 | `timeout` | Seconds before a single attempt is cancelled. `None` = no limit. Sync `fn` tasks cannot be interrupted. |
+| `when` | Predicate `(ctx) -> bool`. When falsy the task is skipped (see [Conditional tasks](#conditional-tasks)) |
+| `loop_until` | Predicate `(ctx, result) -> bool`. Re-runs the body until truthy (see [Loops](#loops)) |
+| `max_iterations` | Maximum loop iterations (default `1` = single run) |
+| `over` | Callable `(ctx) -> list`. Fans the task out into one child per item (see [Fan-out / map](#fan-out--map)) |
 
 Tasks with no `after` (or whose dependencies are all complete) start immediately. Multiple ready tasks run in parallel.
 
@@ -144,6 +177,108 @@ from stagehand import RetryPolicy
 |---|---|---|
 | `max_attempts` | `1` | Total attempts including the first (1 = no retry) |
 | `delay` | `0.0` | Seconds to wait between attempts |
+
+---
+
+### Structured data
+
+Every task result carries a textual `output` *and* an optional structured
+`data` value (any Python object). Deterministic `fn` tasks set it by returning a
+`TaskResult`, or implicitly when they return a non-string:
+
+```python
+def fetch(ctx):
+    return TaskResult(output="3 tickets", data=["T-1", "T-2", "T-3"])
+
+# or simply:
+def fetch(ctx):
+    return ["T-1", "T-2", "T-3"]   # becomes data=[...], output="['T-1', ...]"
+```
+
+`data` is what enables branching and fan-out below, since you can pass typed
+values between tasks instead of only text. Templates can reach into it with
+`{{ tasks.id.data }}` and dotted paths (see [Template expressions](#template-expressions)).
+
+Runtime `inputs` are no longer limited to strings — any value may be passed via
+`inputs={...}` and read with `ctx.get_input("key")`.
+
+> **Note:** `data` is in-memory only. Persisted run state (used by `resume`)
+> keeps `output` and `files`, not `data`.
+
+---
+
+### Conditional tasks
+
+Pass `when` — a predicate `(ctx) -> bool` (sync or async) — to skip a task at
+runtime. A skipped task produces an empty result and is recorded with status
+`skipped`.
+
+```python
+.task("draft", agent="writer", prompt="Write a draft.")
+.task(
+    "publish",
+    agent="writer",
+    prompt="Publish:\n\n{{ tasks.draft }}",
+    after=["draft"],
+    when=lambda ctx: "APPROVED" in ctx.get_task_result("draft").output,
+)
+```
+
+**Skips do not cascade.** Only the task whose `when` is falsy is skipped; its
+dependents still become ready (and see an empty `{{ tasks.skipped }}`). To prune
+a whole branch, put a `when` on the downstream tasks too.
+
+---
+
+### Loops
+
+Pass `loop_until` — a predicate `(ctx, result) -> bool` — together with
+`max_iterations` to re-run a task's body until the predicate returns truthy or
+the cap is reached. The final iteration's result becomes the task result.
+
+```python
+.task(
+    "refine",
+    agent="writer",
+    prompt="Iteration {{ loop.iteration }}. Improve the previous draft:\n\n{{ loop.previous }}",
+    loop_until=lambda ctx, result: "DONE" in result.output,
+    max_iterations=5,
+)
+```
+
+Inside a looping agent prompt, `{{ loop.iteration }}` (0-based) and
+`{{ loop.previous }}` (previous iteration's output, empty on the first pass) are
+available. Loops are node-internal — the DAG stays acyclic. `loop_until` cannot
+be combined with `over`.
+
+---
+
+### Fan-out / map
+
+Pass `over` — a callable `(ctx) -> list` — to fan a task out into one child per
+item at runtime. Agent prompts reference the current item with `{{ item }}`;
+`fn` callables receive it as a second argument, `fn(ctx, item)`.
+
+```python
+.task("fetch", fn=lambda ctx: ["en", "de", "fr"])
+.task(
+    "translate",
+    agent="writer",
+    prompt="Translate the homepage into: {{ item }}",
+    over=lambda ctx: ctx.get_task_result("fetch").data,
+    after=["fetch"],
+)
+.task("bundle", agent="writer",
+      prompt="Combine all translations:\n\n{{ tasks.translate }}",
+      after=["translate"])
+```
+
+The children run in parallel (subject to `concurrency`). The map task's own
+result aggregates them: `data` is the list of child results in order, and
+`output` is their outputs joined by newlines — so downstream tasks depending on
+the map task see the combined result. If any child fails, the map task (and its
+downstream) fails. An empty list completes the map immediately with empty
+results.
 
 ---
 
@@ -219,9 +354,14 @@ Prompts support `{{ }}` expressions to inject values from previous tasks or runt
 | Expression | Resolves to |
 |---|---|
 | `{{ input.key }}` | A value passed via `inputs={"key": "..."}` |
+| `{{ input.key.field }}` | A nested field of a structured input value |
 | `{{ tasks.id }}` | The text output of a completed task |
 | `{{ tasks.id.files }}` | Newline-separated list of file paths produced by a task |
 | `{{ tasks.id.filename_md }}` | Path of a specific file, identified by its slug (`filename.md` → `filename_md`) |
+| `{{ tasks.id.data }}` | The structured `data` value of a task |
+| `{{ tasks.id.data.field }}` | A nested field of a task's `data` (dicts, list indices, attributes) |
+| `{{ item }}` / `{{ item.field }}` | The current item inside a fan-out (`over`) task |
+| `{{ loop.iteration }}` / `{{ loop.previous }}` | The iteration index / previous output inside a loop task |
 
 ---
 
@@ -414,6 +554,13 @@ await scheduler.resume(run_id, workflow)
 ---
 
 ## Examples
+
+Runnable scripts live in [`examples/`](examples/):
+
+- [`ollama_test.py`](examples/ollama_test.py) — sequential and parallel pipelines.
+- [`full_pipeline.py`](examples/full_pipeline.py) — kitchen-sink demo combining a
+  deterministic `fn` task with structured `data`, fan-out (`over`), a conditional
+  task (`when`), structured-data templates, and an iterative loop (`loop_until`).
 
 ### Sequential
 

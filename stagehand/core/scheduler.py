@@ -7,12 +7,15 @@ from enum import Enum, auto
 from typing import Any, Awaitable, Callable, Optional
 
 from stagehand.core.context import RunContext
-from stagehand.core.graph import build_graph
+from stagehand.core.graph import Graph, build_graph
 from stagehand.core.runstate import build_run_state, generate_run_id, load_state, save
 from stagehand.core.template import resolve
-from stagehand.core.workflow import RetryPolicy, TaskResult, Workflow
-from stagehand.ports.executor import AgentExecutor, ExecutionRequest, ExecutionResult
+from stagehand.core.workflow import RetryPolicy, Task, TaskResult, Workflow
+from stagehand.ports.executor import AgentExecutor, ExecutionRequest
 from stagehand.ports.logger import Logger
+
+#: Sentinel marking a task that is not a fan-out child (carries no item).
+_NO_ITEM = object()
 
 
 @dataclass
@@ -29,6 +32,7 @@ class TaskPhase(Enum):
     DONE = auto()
     FAILED = auto()
     CANCELLED = auto()
+    SKIPPED = auto()
 
 
 @dataclass
@@ -36,6 +40,9 @@ class _TaskOutcome:
     task_id: str
     result: Optional[TaskResult] = None
     error: Optional[Exception] = None
+    skipped: bool = False
+    expand: bool = False
+    items: Optional[list] = None
 
 
 class _NullLogger(Logger):
@@ -69,7 +76,7 @@ class Scheduler:
     async def run(
         self,
         workflow: Workflow,
-        inputs: Optional[dict[str, str]] = None,
+        inputs: Optional[dict[str, Any]] = None,
         run_label: str = "",
     ) -> str:
         """Runs all tasks in the workflow. Returns the run_id."""
@@ -87,15 +94,20 @@ class Scheduler:
 
         The workflow must be passed explicitly since there is no YAML file to reload.
         """
+        from stagehand.core.runstate import TaskStatus
+
         state = load_state(run_id, self.run_state_directory)
         run_context = RunContext(run_id=run_id, inputs=state.inputs)
 
         for task_id, task_state in state.tasks.items():
-            if task_state.status == "done":
+            if task_state.status == TaskStatus.DONE:
                 await run_context.set_task_result(
                     task_id,
                     TaskResult(output=task_state.output, files=task_state.files),
                 )
+            elif task_state.status == TaskStatus.SKIPPED:
+                run_context.mark_skipped(task_id)
+                await run_context.set_task_result(task_id, TaskResult())
 
         error = await self._execute(workflow, run_context)
         new_state = build_run_state(run_id, state.workflow_file, workflow, state.inputs, run_context, error)
@@ -116,22 +128,39 @@ class Scheduler:
             task_id: TaskPhase.WAITING for task_id in workflow.tasks
         }
 
-        for task_id in workflow.tasks:
-            if run_context.get_task_result(task_id) is not None:
-                phases[task_id] = TaskPhase.DONE
-                for dependent_id in graph.dependents(task_id):
-                    in_degree[dependent_id] -= 1
+        # Fan-out is the one feature that mutates the graph at runtime. We keep
+        # the dynamically generated children in run-local structures rather than
+        # mutating `workflow`, so the workflow definition stays immutable.
+        tasks_by_id: dict[str, Task] = dict(workflow.tasks)
+        dynamic_dependents: dict[str, list[str]] = {}
+        child_items: dict[str, Any] = {}
+        map_children: dict[str, list[str]] = {}
+        expanded: set[str] = set()
 
         outcome_queue: asyncio.Queue[_TaskOutcome] = asyncio.Queue()
         running_count = 0
         running_tasks: set[asyncio.Task[None]] = set()
         pending: list[str] = []
+        first_error: Optional[Exception] = None
+
+        def dependents_of(task_id: str) -> list[str]:
+            return graph.dependents(task_id) + dynamic_dependents.get(task_id, [])
+
+        for task_id in workflow.tasks:
+            if run_context.get_task_result(task_id) is not None or run_context.is_skipped(task_id):
+                phases[task_id] = TaskPhase.DONE
+                for dependent_id in dependents_of(task_id):
+                    in_degree[dependent_id] -= 1
 
         def launch(task_id: str) -> None:
             nonlocal running_count
             phases[task_id] = TaskPhase.RUNNING
             running_count += 1
-            asyncio_task = asyncio.create_task(self._run_task(task_id, workflow, run_context, outcome_queue))
+            task = tasks_by_id[task_id]
+            item = child_items.get(task_id, _NO_ITEM)
+            asyncio_task = asyncio.create_task(
+                self._run_task(task_id, task, item, workflow, run_context, outcome_queue)
+            )
             running_tasks.add(asyncio_task)
             asyncio_task.add_done_callback(running_tasks.discard)
 
@@ -141,11 +170,79 @@ class Scheduler:
             else:
                 pending.append(task_id)
 
+        async def on_ready(task_id: str) -> None:
+            # A map node becomes "ready" a second time once all its children are
+            # done — that is the join, not a re-run of the body.
+            if task_id in expanded:
+                await do_join(task_id)
+            else:
+                try_launch(task_id)
+
+        async def release_dependents(task_id: str) -> None:
+            for dependent_id in dependents_of(task_id):
+                if phases.get(dependent_id) != TaskPhase.WAITING:
+                    continue
+                in_degree[dependent_id] -= 1
+                if in_degree[dependent_id] == 0:
+                    await on_ready(dependent_id)
+
+        def cancel_downstream(task_id: str) -> None:
+            for dependent_id in dependents_of(task_id):
+                if phases.get(dependent_id) == TaskPhase.WAITING:
+                    phases[dependent_id] = TaskPhase.CANCELLED
+                    self._logger.info(f"task '{dependent_id}' cancelled (upstream '{task_id}' failed)")
+                    cancel_downstream(dependent_id)
+
+        async def handle_expand(map_id: str, items: list) -> None:
+            base = tasks_by_id[map_id]
+            child_ids: list[str] = []
+            for index, item in enumerate(items):
+                child_id = f"{map_id}#{index}"
+                tasks_by_id[child_id] = _child_task(base)
+                child_items[child_id] = item
+                dynamic_dependents[child_id] = [map_id]
+                phases[child_id] = TaskPhase.WAITING
+                in_degree[child_id] = 0
+                child_ids.append(child_id)
+            map_children[map_id] = child_ids
+            expanded.add(map_id)
+            phases[map_id] = TaskPhase.WAITING  # now waiting on its children
+
+            to_launch: list[str] = []
+            for child_id in child_ids:
+                if run_context.get_task_result(child_id) is not None:
+                    phases[child_id] = TaskPhase.DONE  # already done (resume)
+                else:
+                    to_launch.append(child_id)
+            in_degree[map_id] = len(to_launch)
+
+            if not to_launch:
+                await do_join(map_id)
+            else:
+                for child_id in to_launch:
+                    try_launch(child_id)
+
+        async def do_join(map_id: str) -> None:
+            outputs: list[str] = []
+            data: list[Any] = []
+            files: list[str] = []
+            for child_id in map_children.get(map_id, []):
+                result = run_context.get_task_result(child_id)
+                if result is None:
+                    continue
+                outputs.append(result.output)
+                data.append(result.data if result.data is not None else result.output)
+                files.extend(result.files)
+            phases[map_id] = TaskPhase.DONE
+            await run_context.set_task_result(
+                map_id, TaskResult(output="\n".join(outputs), files=files, data=data)
+            )
+            self._logger.info(f"task '{map_id}' done")
+            await release_dependents(map_id)
+
         for task_id in workflow.tasks:
             if in_degree[task_id] == 0 and phases[task_id] == TaskPhase.WAITING:
                 try_launch(task_id)
-
-        first_error: Optional[Exception] = None
 
         while running_count > 0:
             outcome = await outcome_queue.get()
@@ -155,17 +252,18 @@ class Scheduler:
                 if first_error is None:
                     first_error = outcome.error
                 phases[outcome.task_id] = TaskPhase.FAILED
-                _cancel_downstream(outcome.task_id, graph, phases, self._logger)
+                cancel_downstream(outcome.task_id)
+            elif outcome.skipped:
+                phases[outcome.task_id] = TaskPhase.SKIPPED
+                run_context.mark_skipped(outcome.task_id)
+                await run_context.set_task_result(outcome.task_id, TaskResult())
+                await release_dependents(outcome.task_id)
+            elif outcome.expand:
+                await handle_expand(outcome.task_id, outcome.items or [])
             else:
                 phases[outcome.task_id] = TaskPhase.DONE
                 await run_context.set_task_result(outcome.task_id, outcome.result)  # type: ignore[arg-type]
-
-                for dependent_id in graph.dependents(outcome.task_id):
-                    if phases[dependent_id] != TaskPhase.WAITING:
-                        continue
-                    in_degree[dependent_id] -= 1
-                    if in_degree[dependent_id] == 0:
-                        try_launch(dependent_id)
+                await release_dependents(outcome.task_id)
 
             while pending and (self.max_concurrency is None or running_count < self.max_concurrency):
                 launch(pending.pop(0))
@@ -182,62 +280,135 @@ class Scheduler:
     async def _run_task(
         self,
         task_id: str,
+        task: Task,
+        item: Any,
         workflow: Workflow,
         run_context: RunContext,
         outcome_queue: asyncio.Queue[_TaskOutcome],
     ) -> None:
         self._logger.info(f"task '{task_id}' starting")
-        task = workflow.tasks[task_id]
-
         ctx = _RetryContext(task_id=task_id, policy=task.retry, logger=self._logger, timeout=task.timeout)
 
-        if task.fn is not None:
+        # Conditional skip — evaluated before any work.
+        if task.when is not None:
             try:
-                result = await _retry(lambda: _invoke_fn(task.fn, run_context), ctx)  # type: ignore[arg-type]
+                proceed = await _maybe_await(task.when(run_context))
             except Exception as error:
                 self._logger.error(f"task '{task_id}' failed: {error}")
                 await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
                 return
-            self._logger.info(f"task '{task_id}' done")
-            await outcome_queue.put(_TaskOutcome(task_id=task_id, result=result))
-            return
+            if not proceed:
+                self._logger.info(f"task '{task_id}' skipped")
+                await outcome_queue.put(_TaskOutcome(task_id=task_id, skipped=True))
+                return
 
-        agent = workflow.agents[task.agent_id]
-        executor = agent.executor or self.default_executor
-        if executor is None:
-            error = RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
-            self._logger.error(f"task '{task_id}' failed: {error}")
-            await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
+        # Fan-out — resolve the collection and let the scheduler expand it.
+        if task.over is not None:
+            try:
+                items = list(await _maybe_await(task.over(run_context)))
+            except Exception as error:
+                self._logger.error(f"task '{task_id}' failed: {error}")
+                await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
+                return
+            await outcome_queue.put(_TaskOutcome(task_id=task_id, expand=True, items=items))
             return
 
         try:
-            request = ExecutionRequest(
-                system_prompt=agent.system_prompt,
-                model=agent.model,
-                tools=agent.tools,
-                prompt=resolve(task.prompt, run_context),
-                run_id=run_context.run_id,
-                task_id=task_id,
+            result = await _retry(
+                lambda: self._run_body(task_id, task, item, workflow, run_context), ctx
             )
-            exec_result = await _retry(lambda: executor.execute(request), ctx)
         except Exception as error:
             self._logger.error(f"task '{task_id}' failed: {error}")
             await outcome_queue.put(_TaskOutcome(task_id=task_id, error=error))
             return
 
         self._logger.info(f"task '{task_id}' done")
-        await outcome_queue.put(
-            _TaskOutcome(task_id=task_id, result=TaskResult(output=exec_result.output, files=exec_result.files))
-        )
+        await outcome_queue.put(_TaskOutcome(task_id=task_id, result=result))
+
+    async def _run_body(
+        self,
+        task_id: str,
+        task: Task,
+        item: Any,
+        workflow: Workflow,
+        run_context: RunContext,
+    ) -> TaskResult:
+        """Runs the task body once, or repeatedly when ``loop_until`` is set."""
+        if task.fn is not None:
+            return await self._run_fn(task, item, run_context)
+        return await self._run_agent(task_id, task, item, workflow, run_context)
+
+    async def _run_fn(self, task: Task, item: Any, run_context: RunContext) -> TaskResult:
+        result = TaskResult()
+        for _ in range(task.max_iterations):
+            raw = task.fn(run_context) if item is _NO_ITEM else task.fn(run_context, item)
+            if inspect.isawaitable(raw):
+                raw = await raw
+            result = _coerce_result(raw)
+            if task.loop_until is not None and await _maybe_await(task.loop_until(run_context, result)):
+                break
+        return result
+
+    async def _run_agent(
+        self,
+        task_id: str,
+        task: Task,
+        item: Any,
+        workflow: Workflow,
+        run_context: RunContext,
+    ) -> TaskResult:
+        agent = workflow.agents[task.agent_id]
+        executor = agent.executor or self.default_executor
+        if executor is None:
+            raise RuntimeError(f"task {task_id}: agent {task.agent_id!r} has no executor set")
+
+        previous_output = ""
+        result = TaskResult()
+        for iteration in range(task.max_iterations):
+            extra: dict[str, Any] = {}
+            if item is not _NO_ITEM:
+                extra["item"] = item
+            if task.loop_until is not None:
+                extra["loop"] = {"iteration": iteration, "previous": previous_output}
+            request = ExecutionRequest(
+                system_prompt=agent.system_prompt,
+                model=agent.model,
+                tools=agent.tools,
+                prompt=resolve(task.prompt, run_context, extra or None),
+                run_id=run_context.run_id,
+                task_id=task_id,
+            )
+            exec_result = await executor.execute(request)
+            result = TaskResult(output=exec_result.output, files=exec_result.files, data=exec_result.data)
+            if task.loop_until is not None and await _maybe_await(task.loop_until(run_context, result)):
+                break
+            previous_output = result.output
+        return result
 
 
-async def _invoke_fn(fn: Callable, run_context: RunContext) -> TaskResult:
-    raw = fn(run_context)
-    if inspect.isawaitable(raw):
-        raw = await raw
+def _child_task(base: Task) -> Task:
+    """Builds a fan-out child that runs the body once for a single item."""
+    return Task(
+        agent_id=base.agent_id,
+        prompt=base.prompt,
+        fn=base.fn,
+        retry=base.retry,
+        timeout=base.timeout,
+    )
+
+
+def _coerce_result(raw: Any) -> TaskResult:
     if isinstance(raw, TaskResult):
         return raw
-    return TaskResult(output=str(raw))
+    if isinstance(raw, str):
+        return TaskResult(output=raw)
+    return TaskResult(output=str(raw), data=raw)
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 async def _retry(
@@ -269,16 +440,3 @@ async def _retry(
             if ctx.policy.delay > 0:
                 await asyncio.sleep(ctx.policy.delay)
     raise last_error  # type: ignore[misc]
-
-
-def _cancel_downstream(
-    task_id: str,
-    graph: "Graph",  # type: ignore[name-defined]
-    phases: dict[str, TaskPhase],
-    logger: Logger,
-) -> None:
-    for dependent_id in graph.dependents(task_id):
-        if phases[dependent_id] == TaskPhase.WAITING:
-            phases[dependent_id] = TaskPhase.CANCELLED
-            logger.info(f"task '{dependent_id}' cancelled (upstream '{task_id}' failed)")
-            _cancel_downstream(dependent_id, graph, phases, logger)

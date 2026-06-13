@@ -13,6 +13,7 @@ class TaskStatus:
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 @dataclass
@@ -122,9 +123,16 @@ def build_run_state(
     """Assembles a RunState from the outcome of a scheduler run."""
     state = new_run_state(run_id, workflow_file, workflow.name, inputs)
     completed = run_context.all_results()
+    skipped = run_context.skipped_ids()
 
-    for task_id in workflow.tasks:
-        if task_id in completed:
+    # Dynamically generated fan-out children (ids not in workflow.tasks) carry
+    # their results in the run context; persist them so resume can skip them.
+    dynamic_ids = [task_id for task_id in completed if task_id not in workflow.tasks]
+
+    for task_id in list(workflow.tasks) + dynamic_ids:
+        if task_id in skipped:
+            state.tasks[task_id] = TaskState(status=TaskStatus.SKIPPED)
+        elif task_id in completed:
             result = completed[task_id]
             state.tasks[task_id] = TaskState(
                 status=TaskStatus.DONE,

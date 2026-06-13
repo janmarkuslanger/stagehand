@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 if TYPE_CHECKING:
     from stagehand.ports.executor import AgentExecutor
+    from stagehand.core.context import RunContext
 
 
 @dataclass
@@ -58,6 +59,23 @@ class Task:
     run a plain Python callable.  ``fn`` receives a ``RunContext`` and must
     return a ``TaskResult`` or a plain ``str``.  Both sync and async callables
     are supported.
+
+    Runtime dynamics:
+
+    - ``when`` — a predicate ``(RunContext) -> bool``.  When it returns falsy the
+      task is *skipped*: it produces an empty result, is recorded as ``skipped``
+      and its dependents still become ready (skips do not cascade).
+    - ``loop_until`` — a predicate ``(RunContext, TaskResult) -> bool``.  The task
+      body re-runs until the predicate returns truthy or ``max_iterations`` is
+      reached.  Agent prompts may reference ``{{ loop.iteration }}`` and
+      ``{{ loop.previous }}``.
+    - ``over`` — a callable ``(RunContext) -> list``.  Fans the task out into one
+      child per item, running the body for each.  Agent prompts may reference
+      ``{{ item }}``; ``fn`` callables receive ``fn(ctx, item)``.  The task's own
+      result aggregates the children (``data`` = list of child results).
+
+    Both predicates and ``over`` may be sync or async.  ``over`` and
+    ``loop_until`` cannot be combined.
     """
     agent_id: str = ""
     depends_on: list[str] = field(default_factory=list)
@@ -67,17 +85,32 @@ class Task:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     fn: Optional[Callable] = None
     timeout: Optional[float] = None
+    when: Optional[Callable[["RunContext"], Any]] = None
+    over: Optional[Callable[["RunContext"], Any]] = None
+    loop_until: Optional[Callable[["RunContext", "TaskResult"], Any]] = None
+    max_iterations: int = 1
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
             raise ValueError(f"Task.timeout must be > 0, got {self.timeout!r}")
+        if type(self.max_iterations) is not int or self.max_iterations < 1:
+            raise ValueError(
+                f"Task.max_iterations must be an integer >= 1, got {self.max_iterations!r}"
+            )
+        if self.over is not None and self.loop_until is not None:
+            raise ValueError("Task: 'over' (fan-out) and 'loop_until' (loop) cannot be combined")
 
 
 @dataclass
 class TaskResult:
-    """Holds the output produced by a completed task."""
+    """Holds the output produced by a completed task.
+
+    ``output`` is the textual result; ``data`` carries an optional structured
+    value (any Python object) for downstream tasks to branch or map over.
+    """
     output: str = ""
     files: list[str] = field(default_factory=list)
+    data: Any = None
 
 
 @dataclass

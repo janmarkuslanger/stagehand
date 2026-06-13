@@ -19,6 +19,7 @@ class ExecutionRequest:
 class ExecutionResult:
     output: str = ""
     files: list[str] = field(default_factory=list)
+    data: Any = None
 
 
 @dataclass
