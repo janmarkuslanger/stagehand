@@ -11,6 +11,7 @@ from stagehand.core.graph import Graph, build_graph
 from stagehand.core.runstate import build_run_state, generate_run_id, load_state, save
 from stagehand.core.template import resolve
 from stagehand.core.workflow import RetryPolicy, Task, TaskResult, Workflow
+from stagehand.ports.cache import ResultCache, cache_key
 from stagehand.ports.executor import AgentExecutor, ExecutionRequest
 from stagehand.ports.logger import Logger
 
@@ -65,6 +66,7 @@ class Scheduler:
         run_state_directory: str = ".stagehand/runs",
         logger: Optional[Logger] = None,
         max_concurrency: Optional[int] = None,
+        cache: Optional[ResultCache] = None,
     ) -> None:
         if max_concurrency is not None and max_concurrency < 1:
             raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency!r}")
@@ -72,6 +74,7 @@ class Scheduler:
         self.run_state_directory = run_state_directory
         self._logger: Logger = logger or _NullLogger()
         self.max_concurrency = max_concurrency
+        self.cache = cache
 
     async def run(
         self,
@@ -378,11 +381,29 @@ class Scheduler:
                 run_id=run_context.run_id,
                 task_id=task_id,
             )
-            exec_result = await executor.execute(request)
+            exec_result = await self._execute_cached(executor, request, task_id)
             result = TaskResult(output=exec_result.output, files=exec_result.files, data=exec_result.data)
             if task.loop_until is not None and await _maybe_await(task.loop_until(run_context, result)):
                 break
             previous_output = result.output
+        return result
+
+    async def _execute_cached(
+        self,
+        executor: AgentExecutor,
+        request: ExecutionRequest,
+        task_id: str,
+    ) -> Any:
+        """Runs the executor, consulting the result cache when one is configured."""
+        if self.cache is None:
+            return await executor.execute(request)
+        key = cache_key(request)
+        cached = await self.cache.get(key)
+        if cached is not None:
+            self._logger.info(f"task '{task_id}' cache hit")
+            return cached
+        result = await executor.execute(request)
+        await self.cache.set(key, result)
         return result
 
 

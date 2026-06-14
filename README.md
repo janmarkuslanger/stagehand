@@ -5,7 +5,7 @@ Stagehand orchestrates multi-agent AI workflows in pure Python. Each workflow is
 **New here?** Jump to [Get started](#get-started) for a copy-paste first run.
 **Looking for details?** [Concepts](#concepts) · [Executors](#executors) · [Resume](#resume) · [Examples](#examples) · [Architecture](#architecture)
 
-Concepts at a glance: [Builder](#builder) · [Agents](#agents) · [Tasks](#tasks) · [Retry](#retry) · [Structured data](#structured-data) · [Conditional tasks](#conditional-tasks) · [Loops](#loops) · [Fan-out / map](#fan-out--map) · [Logging](#logging) · [Template expressions](#template-expressions) · [Outputs](#outputs)
+Concepts at a glance: [Builder](#builder) · [Agents](#agents) · [Tasks](#tasks) · [Retry](#retry) · [Structured data](#structured-data) · [Conditional tasks](#conditional-tasks) · [Loops](#loops) · [Fan-out / map](#fan-out--map) · [Logging](#logging) · [Caching](#caching) · [Template expressions](#template-expressions) · [Outputs](#outputs)
 
 ---
 
@@ -75,6 +75,7 @@ WorkflowBuilder(name, version="1")
         when, over, loop_until, max_iterations)
   .state_dir(directory)   # where run state is persisted (default: .stagehand/runs)
   .concurrency(n)         # max tasks running simultaneously (default: unlimited)
+  .cache(result_cache)    # reuse identical agent work across runs (default: off)
   .run(inputs={})         # returns run_id
 ```
 
@@ -332,6 +333,81 @@ scheduler = Scheduler(run_state_directory=".stagehand/runs", max_concurrency=4)
 ```
 
 `None` (the default) means unlimited — all ready tasks start immediately. Setting it to `1` makes the scheduler execute one task at a time, regardless of the DAG structure.
+
+---
+
+### Caching
+
+Attach a `ResultCache` to reuse identical agent work across runs. When a task's
+resolved request — `model`, `system_prompt`, `tools` and `prompt` (after
+template substitution) — matches a previous one, the stored result is returned
+instead of calling the backend again. This is the big lever during development:
+re-running a workflow after editing one downstream task no longer recomputes the
+unchanged upstream tasks.
+
+```python
+from stagehand import WorkflowBuilder, FilesystemCache
+
+run_id = await (
+    WorkflowBuilder("pipeline")
+    .agent("writer", executor, model="qwen2.5")
+    .task("draft",  agent="writer", prompt="Write an intro.")
+    .task("review", agent="writer", prompt="Review:\n\n{{ tasks.draft }}", after=["draft"])
+    .cache(FilesystemCache())   # <-- opt in
+    .run()
+)
+```
+
+Stagehand ships two caches:
+
+| Cache | Persistence | Use |
+|---|---|---|
+| `InMemoryCache` | Process-local dict | Tests; dedup within one run |
+| `FilesystemCache` | One JSON file per key (default `.stagehand/cache`) | Survives restarts — the dev loop |
+
+Both accept an optional `ttl` (seconds): entries older than `ttl` are treated as
+a miss, so the backend is queried again. Expiry is lazy — checked on read, never
+evicted in the background — and `FilesystemCache` deletes the stale file when it
+sees it. The default `ttl=None` means entries never expire. This is useful when a
+persistent cache should not reuse results indefinitely:
+
+```python
+FilesystemCache(ttl=3600)   # cached results are reused for at most an hour
+```
+
+The cache key is a SHA-256 of the request's `model`, `system_prompt`, sorted
+`tools` and resolved `prompt`. `run_id` and `task_id` are excluded, so the key
+is stable across runs. Because the `prompt` is the already-resolved string, the
+key changes automatically when an upstream task produces different output — the
+cache self-invalidates along the DAG.
+
+> **Caveats.** Caching is opt-in because it assumes "identical input →
+> identical output", which is a deliberate choice for non-deterministic LLM
+> backends. Only **agent tasks** are cached — deterministic `fn` tasks (often
+> used for fetches and side effects) always run. On a cache hit the stored
+> `output` and `files` are reused, but tools with external side effects are
+> **not** invoked again. Like persisted run state, `FilesystemCache` keeps
+> `output` and `files`, not the in-memory `data` value. With a `ttl` set,
+> caching becomes time-dependent — two runs with identical input can differ
+> depending on whether the entry has expired.
+
+To plug in your own backend (Redis, S3, …), implement the `ResultCache` port:
+
+```python
+from stagehand import ResultCache, ExecutionResult
+
+class MyCache(ResultCache):
+    async def get(self, key: str) -> ExecutionResult | None: ...
+    async def set(self, key: str, result: ExecutionResult) -> None: ...
+```
+
+When using `Scheduler` directly, pass the cache to its constructor:
+
+```python
+from stagehand import Scheduler, FilesystemCache
+
+scheduler = Scheduler(run_state_directory=".stagehand/runs", cache=FilesystemCache())
+```
 
 To write a custom logger — for example to route events to a structured sink — implement the `Logger` port:
 
@@ -619,8 +695,9 @@ builder   →  core/ + ports/
 | Package | Responsibility |
 |---|---|
 | `stagehand/core/` | Domain types, DAG, scheduler, run state, template engine |
-| `stagehand/ports/` | ABCs: `AgentExecutor`, `ArtifactStorage`, `SecretProvider` |
+| `stagehand/ports/` | ABCs: `AgentExecutor`, `ArtifactStorage`, `SecretProvider`, `ResultCache` |
 | `stagehand/adapters/executor/` | `BaseAgentExecutor`, `ClaudeExecutor`, `OllamaExecutor` |
 | `stagehand/adapters/storage/` | `FilesystemStorage` |
 | `stagehand/adapters/secrets/` | `EnvSecretProvider` |
+| `stagehand/adapters/cache/` | `InMemoryCache`, `FilesystemCache` |
 | `stagehand/builder.py` | `WorkflowBuilder` — primary public API |
