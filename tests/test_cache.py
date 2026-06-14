@@ -48,8 +48,8 @@ def test_cache_key_differs_on_prompt():
 
 
 def test_cache_key_tool_order_independent():
-    a = ExecutionRequest(model="m", prompt="p", tools=["read_file", "write_file"])
-    b = ExecutionRequest(model="m", prompt="p", tools=["write_file", "read_file"])
+    a = ExecutionRequest(model="m", system_prompt="s", prompt="p", tools=["read_file", "write_file"])
+    b = ExecutionRequest(model="m", system_prompt="s", prompt="p", tools=["write_file", "read_file"])
     assert cache_key(a) == cache_key(b)
 
 
